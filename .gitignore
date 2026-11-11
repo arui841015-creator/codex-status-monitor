@@ -1,0 +1,16 @@
+# 项目内虚拟环境与构建产物
+.venv/
+build/
+__pycache__/
+*.py[cod]
+
+# 本机运行配置（含 MQTT 密码，绝不入库）
+monitor_config.json
+
+# 发行包
+*.zip
+
+# 工具/编辑器
+.workbuddy/
+.DS_Store
+Thumbs.db

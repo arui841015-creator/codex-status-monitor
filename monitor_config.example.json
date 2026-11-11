@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "identity": {"device_id": ""},
+  "mqtt": {
+    "host": "117.72.43.16",
+    "port": 1883,
+    "tls": false,
+    "username": "",
+    "password": "",
+    "qos": 1,
+    "keepalive": 45,
+    "reconnect_delay_seconds": 5
+  },
+  "watch": {
+    "codex": {
+      "enabled": true,
+      "max_tasks": 3,
+      "interval": 1.5,
+      "executable": "codex"
+    },
+    "workbuddy": {
+      "enabled": true,
+      "max_tasks": 3,
+      "interval": 2.0,
+      "database": "%USERPROFILE%\\.workbuddy\\workbuddy.db"
+    }
+  }
+}
