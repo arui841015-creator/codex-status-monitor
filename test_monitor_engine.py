@@ -102,7 +102,8 @@ class MonitorEngineTests(unittest.TestCase):
 
     def test_placeholder_device_id_is_dropped(self) -> None:
         self.assertEqual(normalize_config({"identity": {"device_id": "REPLACE_ME"}})["identity"]["device_id"], "")
-        self.assertEqual(normalize_config(None)["watch"]["codex"]["max_tasks"], 3)
+        self.assertEqual(normalize_config(None)["watch"]["codex"]["max_tasks"], 1)
+        self.assertEqual(normalize_config(None)["watch"]["workbuddy"]["max_tasks"], 1)
 
     def test_max_tasks_is_clamped(self) -> None:
         config = normalize_config({"watch": {"codex": {"max_tasks": 99}, "workbuddy": {"max_tasks": 0}}})

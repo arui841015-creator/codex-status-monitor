@@ -27,7 +27,9 @@ STATUS_TOPIC_PREFIX = "sdgoods/codex/v1/devices/"
 SCHEMA = "sdgoods.codex.project-status.v1"
 SOURCE = "codex-xiaozhi-bridge"
 CONFIG_VERSION = 2
-DEFAULT_MAX_TASKS = 3
+# One task per channel by default: the device only shows one line, so tracking
+# more than the newest task mostly adds churn. Users can raise it to 1-10 in the UI.
+DEFAULT_MAX_TASKS = 1
 DEFAULT_DATABASE = "%USERPROFILE%\\.workbuddy\\workbuddy.db"
 STATUS_LABELS = {
     "thinking": "THINKING",

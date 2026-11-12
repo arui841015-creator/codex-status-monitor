@@ -11,6 +11,25 @@ from pathlib import Path
 from typing import Any
 
 
+CREATE_NO_WINDOW = 0x08000000
+
+
+def hidden_process_kwargs() -> dict[str, Any]:
+    """Keep the spawned console program from flashing a CMD window.
+
+    ``codex.exe`` is a console executable. When the monitor itself runs without a
+    console (pythonw.exe, or a PyInstaller ``--windowed`` build), Windows gives
+    the child a brand-new console window that stays visible for as long as
+    app-server lives. CREATE_NO_WINDOW plus a hidden STARTUPINFO prevents that.
+    """
+    if os.name != "nt":
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = subprocess.SW_HIDE
+    return {"creationflags": CREATE_NO_WINDOW, "startupinfo": startup}
+
+
 def resolve_executable(value: str = "codex") -> str:
     candidate = str(value or "codex").strip()
     if Path(candidate).is_file():
@@ -57,6 +76,7 @@ class CodexReader:
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    **hidden_process_kwargs(),
                 )
             except OSError as exc:
                 raise CodexReadError(f"无法启动 Codex app-server: {exc}") from exc

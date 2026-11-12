@@ -8,16 +8,18 @@
 
 ## 使用
 
-1. 解压发行包后，直接双击 `app\\CodexStatusMonitor.exe`（无需另外安装 Python）。
+1. 解压**用户绿色包** `CodexStatusMonitor-v2.0.0-win64.zip`，进入 `CodexStatusMonitor\`，双击 `CodexStatusMonitor.exe`（无需安装 Python）。
 2. 填写 **Device ID**（唯一必填项）。
 3. 勾选要监听的程序：**Codex Desktop**、**Workbuddy**，可多选。
 4. 点击「启动监听」。
+
+程序是无控制台的窗口应用，启动时**不会**弹出黑色 CMD 窗口；它拉起的 `codex app-server` 子进程也用隐藏窗口方式创建。
 
 没有「添加通道 / 检索 / 锁定」这类步骤。MQTT Broker 已预填默认值（`117.72.43.16:1883`），需要时在「③ MQTT Broker」里改。
 
 ### 自动监听规则
 
-- 每个勾选的渠道自动取**最近 N 个任务**（默认 3，可调 1-10）。
+- 每个勾选的渠道自动取**最近 N 个任务**（默认 1，即可调 1-10）。默认只跟最新一条，与设备单行显示的需求对齐。
 - 出现新任务时自动接管，并把时间最远的任务顶掉，无需人工登记。
 - 任务进入窗口或状态发生变化时会上报一次；状态不变不会重复上报。
 - 点「预览将跟踪的任务」可只读查看当前窗口内容，不影响监听。
@@ -43,7 +45,9 @@
 - 打包前清空 `PYTHONPATH`，隔离宿主环境注入的模块搜索路径。
 - 需要 Python 3.11+ 且带 tkinter。若系统 `python` 是无 tkinter 的精简版，请确保 `py -3.11` 指向完整 CPython。
 - 配置模板在 PyInstaller 6 的 onedir 布局中会被放进 `_internal`，`build-exe.bat` 构建后额外复制一份到 exe 同级；程序本身也会回退到内置默认配置，模板缺失不会导致启动崩溃。
-- 产物：`build\\dist\\CodexStatusMonitor\\CodexStatusMonitor.exe`；再运行 `python build_release.py` 生成 `codex-status-monitor-release.zip`。
+- 产物：`build\\dist\\CodexStatusMonitor\\CodexStatusMonitor.exe`；再运行 `python build_release.py` 生成两个包：
+  - `CodexStatusMonitor-v2.0.0-win64.zip` —— **发给最终用户的绿色包**：解压即用，内含 `README.txt`，无需 Python。
+  - `codex-status-monitor-release.zip` —— 源码 + 二进制的开发包。
 
 ## 目录
 
@@ -55,7 +59,7 @@
 | `monitor_config.example.json` | 配置模板（schema v2，`watch` 结构） |
 | `test_monitor_engine.py` | 引擎单元测试（`python -m unittest test_monitor_engine`） |
 | `build-exe.bat` | 在项目内 `.venv` 中编译 EXE |
-| `build_release.py` | 生成独立 zip 包（自动从 `build\dist` 取二进制） |
+| `build_release.py` | 生成用户绿色包与源码包（自动从 `build\dist` 取二进制） |
 | `.venv\\` | 项目专属虚拟环境（不入发行包） |
 | `app\\CodexStatusMonitor.exe` | Windows GUI 可执行版本 |
 
