@@ -6,14 +6,17 @@ Tasks are discovered and tracked automatically (newest N per platform).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
+import autostart
 from monitor_engine import (
     DEFAULT_CONFIG,
     DEFAULT_DATABASE,
@@ -24,10 +27,20 @@ from monitor_engine import (
     status_topic,
     validate_device_id,
 )
+from tray_icon import AVAILABLE as TRAY_AVAILABLE
+from tray_icon import IMPORT_ERROR as TRAY_IMPORT_ERROR
+from tray_icon import TrayIcon
 
 FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "monitor_config.json"
+LOG_DIR = Path(os.environ.get("LOCALAPPDATA") or ROOT) / "CodexStatusMonitor"
+LOG_PATH = LOG_DIR / "monitor.log"
+LOG_MAX_BYTES = 512 * 1024
+
+LOCK_NAME = "Local\\CodexStatusMonitor.SingleInstance"
+MINIMIZED_FLAGS = {"--minimized", "--tray", "--startup", "-m"}
+_lock_handle = None
 
 
 def default_config() -> dict[str, Any]:
@@ -35,18 +48,74 @@ def default_config() -> dict[str, Any]:
     return normalize_config(DEFAULT_CONFIG)
 
 
+def parse_args(argv: list[str]) -> bool:
+    """True when the process should boot hidden into the tray (autostart)."""
+    return any(str(item).strip().lower() in MINIMIZED_FLAGS for item in argv)
+
+
+def acquire_instance_lock() -> bool:
+    """Hold a named mutex so a second copy cannot double-publish to the broker.
+
+    Autostart plus a manual launch is the realistic collision: two instances on
+    the same device topic make the state flap. Returns True for the lucky one.
+    """
+    global _lock_handle
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.CreateMutexW(None, 0, LOCK_NAME)
+        if not handle:
+            return True
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _lock_handle = handle
+        return True
+    except Exception:  # noqa: BLE001 - never block startup on this
+        return True
+
+
+def warn_already_running() -> None:
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Codex Status Monitor 已在运行（可能已最小化到系统托盘）。\n"
+            "请在托盘图标上右键打开主界面。",
+            "Codex Status Monitor",
+            0x00000040,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class MonitorApp(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, start_minimized: bool = False) -> None:
         super().__init__()
+        # Withdraw before building widgets so an autostart launch never flashes
+        # a window on the desktop.
+        if start_minimized:
+            self.withdraw()
         self.title("Codex Status Monitor · Codex / Workbuddy → MQTT")
         self.geometry("1020x720")
         self.minsize(900, 620)
         self.config_data = self._load_config()
         self.manager: MonitorManager | None = None
         self.vars: dict[str, tk.Variable] = {}
+        self.tray: TrayIcon | None = None
         self._build()
-        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._build_tray()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(1000, self._tick)
+        if start_minimized:
+            self.after(400, self._startup)
 
     # ---------------- lifecycle ----------------
 
@@ -162,14 +231,28 @@ class MonitorApp(tk.Tk):
         ttk.Label(advanced, text="密码").grid(row=1, column=2, sticky="w", pady=(8, 0))
         ttk.Entry(advanced, textvariable=self.vars["password"], show="*").grid(row=1, column=3, sticky="ew", padx=(8, 14), pady=(8, 0))
 
+        startup = ttk.LabelFrame(tab, text="④ 启动方式", padding=12)
+        startup.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        startup.columnconfigure(0, weight=1)
+        self.vars["autostart"] = tk.BooleanVar(value=autostart.is_enabled())
+        ttk.Checkbutton(
+            startup,
+            text="随系统自动启动（登录后在后台静默运行，只驻留系统托盘）",
+            variable=self.vars["autostart"],
+            command=self._apply_autostart,
+        ).grid(row=0, column=0, sticky="w")
+        self.autostart_hint = ttk.Label(startup, text="", foreground="#666", wraplength=880, justify="left")
+        self.autostart_hint.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._refresh_autostart_hint()
+
         actions = ttk.Frame(tab)
-        actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         ttk.Button(actions, text="预览将跟踪的任务", command=self._preview).pack(side="left")
         ttk.Label(actions, text="（只读扫描，不影响监听）", foreground="#666").pack(side="left", padx=8)
 
         self.preview_output = ScrolledText(tab, height=7, state="disabled", wrap="word", font=("Consolas", 9))
-        self.preview_output.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
-        tab.rowconfigure(4, weight=1)
+        self.preview_output.grid(row=5, column=0, sticky="nsew", pady=(8, 0))
+        tab.rowconfigure(5, weight=1)
 
     def _build_live_tab(self) -> None:
         tab = self.live_tab
@@ -183,7 +266,10 @@ class MonitorApp(tk.Tk):
         self.incoming_output.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         self.outgoing_output = ScrolledText(tab, state="disabled", wrap="word", font=("Consolas", 9))
         self.outgoing_output.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
-        ttk.Label(tab, text="运行日志", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        ttk.Label(tab, text="运行日志", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="w", pady=(10, 4))
+        ttk.Label(tab, text=f"后台运行时写入 {LOG_PATH}", foreground="#888780").grid(
+            row=2, column=1, sticky="e", pady=(10, 4)
+        )
         self.log_output = ScrolledText(tab, height=9, state="disabled", wrap="word", font=("Consolas", 9))
         self.log_output.grid(row=3, column=0, columnspan=2, sticky="nsew")
 
@@ -261,6 +347,44 @@ class MonitorApp(tk.Tk):
             return
         self._persist(config)
 
+    # ---------------- autostart ----------------
+
+    def _refresh_autostart_hint(self) -> None:
+        label = getattr(self, "autostart_hint", None)
+        if label is None:
+            return
+        if not autostart.supported():
+            label.configure(text="当前系统不支持自动启动（仅 Windows 可用）。")
+            return
+        command = autostart.current_command()
+        if command:
+            label.configure(
+                text=f"已启用，登录后自动执行：{command}\n移动或重命名程序目录后，取消再重新勾选一次即可修正。"
+            )
+        else:
+            label.configure(
+                text="勾选后只写入当前用户的启动项（HKCU\\...\\Run），不需要管理员权限；取消勾选即完全移除。"
+            )
+
+    def _apply_autostart(self) -> None:
+        wanted = bool(self.vars["autostart"].get())
+        try:
+            if wanted:
+                command = autostart.enable()
+                self._log(f"已启用随系统自动启动：{command}")
+            else:
+                autostart.disable()
+                command = ""
+                self._log("已取消随系统自动启动")
+        except (OSError, RuntimeError) as exc:
+            self.vars["autostart"].set(autostart.is_enabled())
+            self._refresh_autostart_hint()
+            messagebox.showerror("设置失败", f"无法修改启动项：{exc}")
+            return
+        self._refresh_autostart_hint()
+        if wanted and command:
+            self._log("下次登录将自动在后台监听，窗口只驻留系统托盘")
+
     # ---------------- actions ----------------
 
     def _preview(self) -> None:
@@ -293,16 +417,19 @@ class MonitorApp(tk.Tk):
         self.preview_output.see("end")
         self.preview_output.configure(state="disabled")
 
-    def _start(self) -> None:
+    def _start(self, quiet: bool = False) -> bool:
         if self.manager and self.manager.running:
-            return
+            return True
         try:
             config = self._collect_config()
         except ValueError as exc:
-            messagebox.showerror("配置无效", str(exc))
-            return
+            if quiet:
+                self._log(f"自启动跳过：{exc}")
+            else:
+                messagebox.showerror("配置无效", str(exc))
+            return False
         if not self._persist(config, silent=True):
-            return
+            return False
         manager = MonitorManager(
             config,
             lambda message: self.after(0, lambda: self._log(message)),
@@ -311,10 +438,15 @@ class MonitorApp(tk.Tk):
         try:
             manager.start()
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("启动失败", str(exc))
-            return
+            if quiet:
+                self._log(f"自启动失败：{exc}")
+            else:
+                messagebox.showerror("启动失败", str(exc))
+            return False
         self.manager = manager
         self.state_label.configure(text="● 监听中", foreground="#087f5b")
+        self._sync_tray()
+        return True
 
     def _stop(self) -> None:
         if self.manager:
@@ -322,6 +454,7 @@ class MonitorApp(tk.Tk):
             self.manager = None
         self.state_label.configure(text="● 已停止", foreground="#a33")
         self.link_label.configure(text="")
+        self._sync_tray()
 
     def _tick(self) -> None:
         """Refresh the header with live tracking / broker status."""
@@ -344,6 +477,7 @@ class MonitorApp(tk.Tk):
                 self.link_label.configure(text="填写 Device ID，勾选渠道，点「启动监听」即可。")
         except Exception:  # noqa: BLE001
             pass
+        self._sync_tray()
         self.after(1200, self._tick)
 
     def _observation(self, item: dict[str, Any]) -> None:
@@ -359,11 +493,114 @@ class MonitorApp(tk.Tk):
         self.log_output.insert("end", message + "\n")
         self.log_output.see("end")
         self.log_output.configure(state="disabled")
+        self._append_log_file(message)
 
-    def _close(self) -> None:
+    @staticmethod
+    def _append_log_file(message: str) -> None:
+        """Mirror the in-app log to disk so autostart runs are diagnosable."""
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            if LOG_PATH.is_file() and LOG_PATH.stat().st_size > LOG_MAX_BYTES:
+                LOG_PATH.unlink()
+            with LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n")
+        except OSError:
+            pass
+
+    # ---------------- tray ----------------
+
+    def _build_tray(self) -> None:
+        if not TRAY_AVAILABLE:
+            self._log(f"系统托盘不可用（{TRAY_IMPORT_ERROR}），关闭窗口将直接退出")
+            return
+        tray = TrayIcon(
+            "Codex Status Monitor",
+            is_listening=lambda: bool(self.manager and self.manager.running),
+            on_show=self._show_from_tray,
+            on_toggle=self._toggle_from_tray,
+            on_quit=self._quit_from_tray,
+        )
+        if not tray.start():
+            self._log("系统托盘初始化失败，关闭窗口将直接退出")
+            return
+        self.tray = tray
+        self._sync_tray()
+
+    def _sync_tray(self) -> None:
+        tray = self.tray
+        if tray is None:
+            return
+        if not (self.manager and self.manager.running):
+            tray.set_state("stopped", "Codex Status Monitor · 已停止")
+            return
+        publisher = self.manager.publisher
+        if publisher is not None and not publisher.connected:
+            tray.set_state("warning", "Codex Status Monitor · 监听中（MQTT 未连接）")
+        else:
+            tray.set_state("running", "Codex Status Monitor · 监听中")
+
+    # All tray callbacks arrive on the tray thread; hop back to Tk.
+
+    def _show_from_tray(self) -> None:
+        self.after(0, self._do_show)
+
+    def _do_show(self) -> None:
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _toggle_from_tray(self) -> None:
+        self.after(0, self._do_toggle)
+
+    def _do_toggle(self) -> None:
+        if self.manager and self.manager.running:
+            self._stop()
+        else:
+            self._start()
+
+    def _quit_from_tray(self) -> None:
+        self.after(0, self._quit)
+
+    def _quit(self) -> None:
         self._stop()
+        if self.tray is not None:
+            self.tray.stop()
+            self.tray = None
         self.destroy()
+
+    def _on_close(self) -> None:
+        """The X button parks the app in the tray while listening continues."""
+        if self.tray is not None:
+            self.withdraw()
+            self._log("窗口已最小化到系统托盘，监听继续运行（右键托盘图标可恢复或退出）")
+            self.tray.notify("已最小化到系统托盘，监听继续运行。")
+            return
+        self._quit()
+
+    def _startup(self) -> None:
+        """Autostart path: start listening and stay hidden."""
+        if self._start(quiet=True):
+            self._log("自启动完成：已在后台监听，窗口驻留系统托盘")
+            return
+        self._do_show()
+        self._log("自启动未完成（配置不完整），已打开主界面等待设置")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    minimized = parse_args(args)
+    if not acquire_instance_lock():
+        if not minimized:
+            warn_already_running()
+        return 0
+    autostart.sync()
+    MonitorApp(start_minimized=minimized).mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    MonitorApp().mainloop()
+    sys.exit(main())
