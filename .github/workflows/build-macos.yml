@@ -72,6 +72,9 @@ jobs:
           test -f "$APP/Contents/MacOS/monitor_config.example.json" || { echo "缺少配置模板"; exit 1; }
           file "$APP/Contents/MacOS/CodexStatusMonitor"
           codesign -dv "$APP" 2>&1 | head -5 || true
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          echo "CFBundleShortVersionString = $VER"
+          if [ "$VER" = "0.0.0" ]; then echo "版本号没有被写入 Info.plist"; exit 1; fi
           unzip -l artifacts/*.zip | tail -5
 
       - uses: actions/upload-artifact@v4

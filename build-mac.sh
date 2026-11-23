@@ -65,6 +65,18 @@ fi
 # somewhere else entirely.
 cp -f "$ROOT/monitor_config.example.json" "$APP/Contents/MacOS/monitor_config.example.json"
 
+# PyInstaller leaves CFBundleShortVersionString at 0.0.0, which Finder shows in
+# Get Info. Patch it before signing — editing Info.plist afterwards would
+# invalidate the signature.
+PLIST="$APP/Contents/Info.plist"
+if [ -x /usr/libexec/PlistBuddy ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$PLIST" 2>/dev/null \
+    || echo "WARN: 无法写入版本号，Info.plist 将保留 0.0.0"
+else
+  echo "WARN: 未找到 PlistBuddy，Info.plist 将保留 0.0.0"
+fi
+
 echo "[5/6] 组织发布目录 ..."
 STAGE="$ROOT/build/stage-mac"
 rm -rf "$STAGE"
