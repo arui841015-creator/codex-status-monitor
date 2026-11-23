@@ -10,7 +10,7 @@
 
 **Windows**：解压 `CodexStatusMonitor-v2.2.0-win64.zip`，进入 `CodexStatusMonitor\`，双击 `CodexStatusMonitor.exe`（无需安装 Python）。
 
-**macOS**：解压 `CodexStatusMonitor-v2.2.0-macos-<arch>.zip`，把 `CodexStatusMonitor.app` 拖进「应用程序」。首次启动必须**右键 → 打开**（未做 Apple 公证），详见包内 `使用说明.txt`。
+**macOS**：解压 `CodexStatusMonitor-v2.2.0-macos-<arch>.zip`，把 `CodexStatusMonitor.app` 拖进「应用程序」。首次启动必须**右键 → 打开**（未做 Apple 公证），详见包内 `README-macOS.txt`。
 
 然后：
 
@@ -97,7 +97,7 @@ PyInstaller **不能跨平台编译**：`.app` 只能在 macOS 上生成，Windo
 ./build-mac.sh
 ```
 
-脚本会先跑单元测试、校验 tkinter，再打出 `build/dist-mac/CodexStatusMonitor.app`，做 ad-hoc 签名（`codesign -s -`），最后用 `ditto` 压成 `CodexStatusMonitor-v2.2.0-macos-<arch>.zip`（内含 `使用说明.txt`）。
+脚本会先跑单元测试、校验 tkinter，再打出 `build/dist-mac/CodexStatusMonitor.app`，做 ad-hoc 签名（`codesign -s -`），最后用 `ditto` 压成 `CodexStatusMonitor-v2.2.0-macos-<arch>.zip`（内含 `README-macOS.txt`）。
 
 - 需要 Python 3.11+ 且带 tkinter；用 python.org 安装包，或 `brew install python-tk`。
 - `pystray` 在 macOS 上依赖 `pyobjc-framework-Cocoa`，已写入 `requirements.txt` 的平台条件。

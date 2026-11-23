@@ -71,11 +71,13 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/$NAME"
 # ditto, not cp -R: it keeps the symlinks and resource forks a bundle needs.
 ditto "$APP" "$STAGE/$NAME/CodexStatusMonitor.app"
-cp -f "$ROOT/README-macOS.txt" "$STAGE/$NAME/使用说明.txt"
+# ASCII filename on purpose: ditto stores UTF-8 names without setting the zip
+# UTF-8 flag, so a Chinese name shows up as mojibake in any non-macOS extractor.
+cp -f "$ROOT/README-macOS.txt" "$STAGE/$NAME/README-macOS.txt"
 
 # Ad-hoc signature: keeps the bundle internally consistent so Gatekeeper's
 # "damaged" check passes. It is NOT notarised, so the first launch still needs
-# right-click -> Open (documented in 使用说明.txt).
+# right-click -> Open (documented in README-macOS.txt).
 if ! codesign --force --deep --sign - "$STAGE/$NAME/CodexStatusMonitor.app" 2>/dev/null; then
   echo "WARN: codesign 失败，产物未签名；首次打开需右键 -> 打开。"
 fi

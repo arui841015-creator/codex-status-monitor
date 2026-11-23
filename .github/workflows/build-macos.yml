@@ -29,7 +29,9 @@ jobs:
         include:
           - runner: macos-latest
             arch: arm64
-          - runner: macos-13
+          # GitHub retired the macos-13 label; macos-15-intel is the current
+          # x86_64 image. Kept as a fallback build, not the primary target.
+          - runner: macos-15-intel
             arch: x86_64
     steps:
       - uses: actions/checkout@v4
