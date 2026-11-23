@@ -300,10 +300,27 @@ def read_workbuddy_sessions(path: Path) -> list[dict[str, Any]]:
         connection.close()
 
 
+def _basename(raw: str) -> str:
+    """Last path segment, accepting Windows separators on any host.
+
+    A session created on Windows keeps a backslash path even when the database
+    is read on macOS, and POSIX treats "\\" as an ordinary filename character —
+    Path(raw).name would then return the whole string. Normalising only when
+    the string has backslashes and no forward slashes keeps real POSIX
+    filenames that legally contain a backslash intact.
+    """
+    if not raw:
+        return ""
+    text = raw
+    if "\\" in text and "/" not in text:
+        text = text.replace("\\", "/")
+    return Path(text).name
+
+
 def project_name(cwd: object, title: object = None) -> str:
     raw = str(cwd or "").strip().rstrip("\\/")
-    if raw and Path(raw).name:
-        return Path(raw).name
+    if _basename(raw):
+        return _basename(raw)
     return safe_text(title, "workbuddy")
 
 

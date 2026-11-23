@@ -98,6 +98,17 @@ class PlatformPathTest(unittest.TestCase):
             path = monitor_app._default_config_path()
         self.assertEqual(path, monitor_app.ROOT / "monitor_config.json")
 
+    def test_project_name_reads_windows_paths_on_any_host(self) -> None:
+        # A session created on Windows keeps a backslash path. POSIX would treat
+        # the whole string as one filename, so it has to be split explicitly.
+        self.assertEqual(monitor_engine.project_name(r"C:\work\demo"), "demo")
+
+    def test_project_name_reads_posix_paths(self) -> None:
+        self.assertEqual(monitor_engine.project_name("/Users/me/projects/demo"), "demo")
+
+    def test_project_name_falls_back_to_title(self) -> None:
+        self.assertEqual(monitor_engine.project_name("", "会话标题"), "会话标题")
+
 
 if __name__ == "__main__":
     unittest.main()
