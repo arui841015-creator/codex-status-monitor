@@ -30,7 +30,9 @@ CONFIG_VERSION = 2
 # One task per channel by default: the device only shows one line, so tracking
 # more than the newest task mostly adds churn. Users can raise it to 1-10 in the UI.
 DEFAULT_MAX_TASKS = 1
-DEFAULT_DATABASE = "%USERPROFILE%\\.workbuddy\\workbuddy.db"
+# Written with a leading "~" so the same default resolves on Windows and macOS.
+# Older configs may still hold "%USERPROFILE%\..." — expand_path accepts both.
+DEFAULT_DATABASE = "~/.workbuddy/workbuddy.db"
 STATUS_LABELS = {
     "thinking": "THINKING",
     "working": "WORKING",
@@ -272,6 +274,11 @@ def expand_path(value: object) -> Path:
     text = os.path.expandvars(str(value or "").strip())
     if text.startswith("%USERPROFILE%"):
         text = text.replace("%USERPROFILE%", str(Path.home()), 1)
+    if os.name != "nt":
+        # Configs carried over from Windows store backslash separators, and on
+        # POSIX a backslash is a legal filename character — the path would
+        # silently resolve to a file that cannot exist.
+        text = text.replace("\\", "/")
     return Path(text).expanduser().resolve()
 
 

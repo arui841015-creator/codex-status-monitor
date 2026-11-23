@@ -1,3 +1,5 @@
 paho-mqtt>=2.0
 pystray>=0.19.5
 pillow>=10.0
+# pystray's macOS backend is a thin wrapper over AppKit (NSStatusBar).
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"

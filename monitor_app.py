@@ -33,14 +33,57 @@ from tray_icon import TrayIcon
 
 FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "monitor_config.json"
-LOG_DIR = Path(os.environ.get("LOCALAPPDATA") or ROOT) / "CodexStatusMonitor"
+def _default_config_path() -> Path:
+    """Where the settings file lives.
+
+    A macOS app must not write inside its own bundle: it would invalidate the
+    code signature and vanish the next time the .app is replaced. macOS gets
+    the standard Application Support location instead. Windows keeps the
+    portable next-to-the-exe file it has always used.
+    """
+    if sys.platform == "darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "CodexStatusMonitor"
+            / "monitor_config.json"
+        )
+    return ROOT / "monitor_config.json"
+
+
+CONFIG_PATH = _default_config_path()
+def _default_log_dir() -> Path:
+    """The directory each OS expects application logs to live in."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or ROOT)
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Logs"
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    return base / "CodexStatusMonitor"
+
+
+LOG_DIR = _default_log_dir()
 LOG_PATH = LOG_DIR / "monitor.log"
 LOG_MAX_BYTES = 512 * 1024
 
 LOCK_NAME = "Local\\CodexStatusMonitor.SingleInstance"
+LOCK_FILE = LOG_DIR / "monitor.lock"
 MINIMIZED_FLAGS = {"--minimized", "--tray", "--startup", "-m"}
 _lock_handle = None
+
+# Tk silently falls back to a default face, but an unknown family first costs a
+# font lookup and can pick a face that clips CJK text. Name the platform's own.
+if sys.platform == "win32":
+    FONT_UI = "Segoe UI"
+    FONT_MONO = "Consolas"
+elif sys.platform == "darwin":
+    FONT_UI = "Helvetica Neue"
+    FONT_MONO = "Menlo"
+else:
+    FONT_UI = "DejaVu Sans"
+    FONT_MONO = "DejaVu Sans Mono"
 
 
 def default_config() -> dict[str, Any]:
@@ -53,15 +96,41 @@ def parse_args(argv: list[str]) -> bool:
     return any(str(item).strip().lower() in MINIMIZED_FLAGS for item in argv)
 
 
+def _acquire_posix_lock() -> bool:
+    """Same guarantee as the Windows mutex, via an advisory file lock.
+
+    macOS has no named kernel mutex, so a lock file under the log directory is
+    the portable equivalent. The handle is kept in a module global: closing it,
+    or letting it be collected, would release the lock.
+    """
+    global _lock_handle
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows handled elsewhere
+        return True
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handle = LOCK_FILE.open("a+")
+    except OSError:
+        return True
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _lock_handle = handle
+    return True
+
+
 def acquire_instance_lock() -> bool:
-    """Hold a named mutex so a second copy cannot double-publish to the broker.
+    """Hold a lock so a second copy cannot double-publish to the broker.
 
     Autostart plus a manual launch is the realistic collision: two instances on
     the same device topic make the state flap. Returns True for the lucky one.
     """
     global _lock_handle
     if sys.platform != "win32":
-        return True
+        return _acquire_posix_lock()
     try:
         import ctypes
 
@@ -82,16 +151,25 @@ def acquire_instance_lock() -> bool:
 
 
 def warn_already_running() -> None:
+    message = (
+        "Codex Status Monitor 已在运行（可能已最小化到托盘 / 菜单栏）。\n"
+        "请在图标上右键选择「显示主界面」。"
+    )
+    if sys.platform != "win32":
+        # No Win32 MessageBox here; a short-lived Tk root is the least
+        # surprising way to say the same thing on macOS.
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo("Codex Status Monitor", message)
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        return
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(
-            None,
-            "Codex Status Monitor 已在运行（可能已最小化到系统托盘）。\n"
-            "请在托盘图标上右键打开主界面。",
-            "Codex Status Monitor",
-            0x00000040,
-        )
+        ctypes.windll.user32.MessageBoxW(None, message, "Codex Status Monitor", 0x00000040)
     except Exception:  # noqa: BLE001
         pass
 
@@ -133,7 +211,7 @@ class MonitorApp(tk.Tk):
         header = ttk.Frame(self, padding=(14, 10))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(2, weight=1)
-        ttk.Label(header, text="Codex Status Monitor", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Codex Status Monitor", font=(FONT_UI, 16, "bold")).grid(row=0, column=0, sticky="w")
         self.state_label = ttk.Label(header, text="● 已停止", foreground="#a33")
         self.state_label.grid(row=0, column=1, sticky="w", padx=16)
         ttk.Button(header, text="保存配置", command=self._save_interactive).grid(row=0, column=3, padx=4)
@@ -164,7 +242,7 @@ class MonitorApp(tk.Tk):
         identity_cfg = self.config_data.get("identity") or {}
         self.vars["device_id"] = tk.StringVar(value=identity_cfg.get("device_id", ""))
         ttk.Label(identity, text="Device / Driver ID").grid(row=0, column=0, sticky="w")
-        entry = ttk.Entry(identity, textvariable=self.vars["device_id"], width=32, font=("Consolas", 10))
+        entry = ttk.Entry(identity, textvariable=self.vars["device_id"], width=32, font=(FONT_MONO, 10))
         entry.grid(row=0, column=1, sticky="w", padx=(10, 0))
         entry.focus_set()
         self.topic_label = ttk.Label(identity, text="主题：待填写", foreground="#666")
@@ -237,7 +315,7 @@ class MonitorApp(tk.Tk):
         self.vars["autostart"] = tk.BooleanVar(value=autostart.is_enabled())
         ttk.Checkbutton(
             startup,
-            text="随系统自动启动（登录后在后台静默运行，只驻留系统托盘）",
+            text="随系统自动启动（登录后在后台静默运行，只驻留托盘 / 菜单栏）",
             variable=self.vars["autostart"],
             command=self._apply_autostart,
         ).grid(row=0, column=0, sticky="w")
@@ -250,7 +328,7 @@ class MonitorApp(tk.Tk):
         ttk.Button(actions, text="预览将跟踪的任务", command=self._preview).pack(side="left")
         ttk.Label(actions, text="（只读扫描，不影响监听）", foreground="#666").pack(side="left", padx=8)
 
-        self.preview_output = ScrolledText(tab, height=7, state="disabled", wrap="word", font=("Consolas", 9))
+        self.preview_output = ScrolledText(tab, height=7, state="disabled", wrap="word", font=(FONT_MONO, 9))
         self.preview_output.grid(row=5, column=0, sticky="nsew", pady=(8, 0))
         tab.rowconfigure(5, weight=1)
 
@@ -260,17 +338,17 @@ class MonitorApp(tk.Tk):
         tab.columnconfigure(1, weight=1)
         tab.rowconfigure(1, weight=1)
         tab.rowconfigure(3, weight=1)
-        ttk.Label(tab, text="读取到的任务状态", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Label(tab, text="已上报到 MQTT 的内容", font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w", pady=(0, 4))
-        self.incoming_output = ScrolledText(tab, state="disabled", wrap="word", font=("Consolas", 9))
+        ttk.Label(tab, text="读取到的任务状态", font=(FONT_UI, 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(tab, text="已上报到 MQTT 的内容", font=(FONT_UI, 10, "bold")).grid(row=0, column=1, sticky="w", pady=(0, 4))
+        self.incoming_output = ScrolledText(tab, state="disabled", wrap="word", font=(FONT_MONO, 9))
         self.incoming_output.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        self.outgoing_output = ScrolledText(tab, state="disabled", wrap="word", font=("Consolas", 9))
+        self.outgoing_output = ScrolledText(tab, state="disabled", wrap="word", font=(FONT_MONO, 9))
         self.outgoing_output.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
-        ttk.Label(tab, text="运行日志", font=("Segoe UI", 10, "bold")).grid(row=2, column=0, sticky="w", pady=(10, 4))
+        ttk.Label(tab, text="运行日志", font=(FONT_UI, 10, "bold")).grid(row=2, column=0, sticky="w", pady=(10, 4))
         ttk.Label(tab, text=f"后台运行时写入 {LOG_PATH}", foreground="#888780").grid(
             row=2, column=1, sticky="e", pady=(10, 4)
         )
-        self.log_output = ScrolledText(tab, height=9, state="disabled", wrap="word", font=("Consolas", 9))
+        self.log_output = ScrolledText(tab, height=9, state="disabled", wrap="word", font=(FONT_MONO, 9))
         self.log_output.grid(row=3, column=0, columnspan=2, sticky="nsew")
 
     # ---------------- helpers ----------------
@@ -329,6 +407,7 @@ class MonitorApp(tk.Tk):
 
     def _persist(self, config: dict[str, Any], silent: bool = False) -> bool:
         try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         except OSError as exc:
             if not silent:
@@ -354,7 +433,7 @@ class MonitorApp(tk.Tk):
         if label is None:
             return
         if not autostart.supported():
-            label.configure(text="当前系统不支持自动启动（仅 Windows 可用）。")
+            label.configure(text=f"当前系统不支持自动启动（{autostart.platform_name()}）。")
             return
         command = autostart.current_command()
         if command:
@@ -363,7 +442,7 @@ class MonitorApp(tk.Tk):
             )
         else:
             label.configure(
-                text="勾选后只写入当前用户的启动项（HKCU\\...\\Run），不需要管理员权限；取消勾选即完全移除。"
+                text=f"勾选后只写入{autostart.location_hint()}，不需要管理员权限；取消勾选即完全移除。"
             )
 
     def _apply_autostart(self) -> None:

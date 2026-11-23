@@ -37,10 +37,28 @@ def resolve_executable(value: str = "codex") -> str:
     found = shutil.which(candidate)
     if found:
         return found
-    local_root = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
-    candidates = list(local_root.glob("*/codex.exe")) if local_root.is_dir() else []
-    if candidates:
-        return str(max(candidates, key=lambda item: item.stat().st_mtime))
+    if os.name == "nt":
+        local_root = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
+        candidates = list(local_root.glob("*/codex.exe")) if local_root.is_dir() else []
+        if candidates:
+            return str(max(candidates, key=lambda item: item.stat().st_mtime))
+    else:
+        # A GUI app launched from the Dock or a LaunchAgent inherits a minimal
+        # PATH (/usr/bin:/bin:/usr/sbin:/sbin), so npm/Homebrew installs are
+        # invisible to which(). Probe the usual homes explicitly.
+        home = Path.home()
+        for folder in (
+            home / ".local" / "bin",
+            home / "bin",
+            home / ".npm-global" / "bin",
+            home / ".volta" / "bin",
+            home / ".bun" / "bin",
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+        ):
+            probe = folder / candidate
+            if probe.is_file() and os.access(probe, os.X_OK):
+                return str(probe)
     raise FileNotFoundError(f"找不到 Codex 可执行文件：{candidate}")
 
 

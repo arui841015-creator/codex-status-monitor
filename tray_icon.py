@@ -9,6 +9,7 @@ degrade to "closing the window quits" rather than crash the app.
 """
 from __future__ import annotations
 
+import sys
 import threading
 from typing import Callable
 
@@ -79,8 +80,20 @@ class TrayIcon:
             self._icon = pystray.Icon(
                 "codex-status-monitor", _glyph(COLORS["stopped"]), self.title, menu
             )
-            self._thread = threading.Thread(target=self._loop, name="csm-tray", daemon=True)
-            self._thread.start()
+            if sys.platform == "darwin":
+                # Cocoa's status item must be created on the main thread, which
+                # Tk is already holding for its own event loop. run_detached()
+                # registers the icon without stealing the loop, so both live
+                # side by side; a background thread here would deadlock or
+                # crash the app on macOS.
+                runner = getattr(self._icon, "run_detached", None)
+                if runner is None:
+                    self._icon = None
+                    return False
+                runner()
+            else:
+                self._thread = threading.Thread(target=self._loop, name="csm-tray", daemon=True)
+                self._thread.start()
         except Exception:  # noqa: BLE001
             self._icon = None
             return False

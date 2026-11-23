@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 OUT_SOURCE = ROOT.parent / "codex-status-monitor-release.zip"
 OUT_USER = ROOT.parent / f"CodexStatusMonitor-v{APP_VERSION}-win64.zip"
 FILES = [
@@ -36,6 +36,8 @@ FILES = [
     "start-monitor.bat",
     "build-exe.bat",
     "build_release.py",
+    "build-mac.sh",
+    "README-macOS.txt",
 ]
 # Places a frozen onedir build may live. build-exe.bat writes build/dist;
 # earlier packaging runs staged into ../codex-status-monitor-bin.

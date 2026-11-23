@@ -1,0 +1,80 @@
+name: Build macOS
+
+# PyInstaller cannot cross-compile, so the .app has to be produced on macOS.
+# This workflow is that macOS machine: it runs on GitHub's runners and exposes
+# the finished zip as a build artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的分支 / 标签（留空用当前默认分支）"
+        required: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    # The Intel runner label is the first thing GitHub retires; a missing label
+    # must not turn the whole run red while the arm64 build is fine.
+    continue-on-error: ${{ matrix.arch == 'x86_64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 确认 Python 带 tkinter
+        run: |
+          python -V
+          if python -c "import tkinter; print('tk', tkinter.TkVersion)" 2>/dev/null; then
+            echo "tkinter 可用"
+          else
+            echo "tkinter 缺失，安装 Homebrew 的 Tk 并重试"
+            brew install python@3.11 python-tk@3.11
+            echo "$(brew --prefix python@3.11)/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyinstaller>=6.0"
+
+      - name: 构建 .app
+        env:
+          OUT_DIR: ${{ github.workspace }}/artifacts
+        run: bash build-mac.sh
+
+      - name: 校验产物
+        run: |
+          ls -lh artifacts/
+          APP="build/dist-mac/CodexStatusMonitor.app"
+          test -d "$APP" || { echo "缺少 .app"; exit 1; }
+          test -f "$APP/Contents/MacOS/CodexStatusMonitor" || { echo "缺少可执行文件"; exit 1; }
+          test -f "$APP/Contents/MacOS/monitor_config.example.json" || { echo "缺少配置模板"; exit 1; }
+          file "$APP/Contents/MacOS/CodexStatusMonitor"
+          codesign -dv "$APP" 2>&1 | head -5 || true
+          unzip -l artifacts/*.zip | tail -5
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CodexStatusMonitor-macos-${{ matrix.arch }}
+          path: artifacts/*.zip
+          if-no-files-found: warn

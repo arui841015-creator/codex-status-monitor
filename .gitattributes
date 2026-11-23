@@ -1,0 +1,14 @@
+# Keep the repository LF-only so Windows and macOS checkouts diff cleanly.
+# GitHub's macOS runner is also strict: a CRLF shell script fails with
+# "bad interpreter: /bin/bash^M".
+* text=auto eol=lf
+
+# Batch files are read by cmd.exe; CRLF is what it expects.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Build outputs and binaries must never be touched.
+*.zip binary
+*.exe binary
+*.png binary
+*.ico binary
