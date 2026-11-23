@@ -38,6 +38,8 @@ FILES = [
     "build_release.py",
     "build-mac.sh",
     "README-macOS.txt",
+    ".gitattributes",
+    ".github/workflows/build-macos.yml",
 ]
 # Places a frozen onedir build may live. build-exe.bat writes build/dist;
 # earlier packaging runs staged into ../codex-status-monitor-bin.
@@ -148,7 +150,10 @@ def build_source_package(binary: Path | None) -> Path:
         source = ROOT / name
         if not source.is_file():
             raise SystemExit(f"missing release file: {source}")
-        shutil.copy2(source, package / name)
+        target = package / name
+        # .github/workflows/... is nested; the directory has to exist first.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
     if binary is None:
         print("WARNING: no frozen build found, packaging sources only.")
         print("Run build-exe.bat first, then re-run this script for a bundled release.")
