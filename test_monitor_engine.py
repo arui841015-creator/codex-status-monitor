@@ -27,6 +27,7 @@ from doubao_reader import (
     WebSocketError,
     _exe_from,
     cdp_targets,
+    chat_targets,
     classify_text,
     conversation_title,
     debug_port_ready,
@@ -34,6 +35,7 @@ from doubao_reader import (
     pick_chat_target,
     session_key,
 )
+import doubao_reader
 
 
 class RecordingPublisher:
@@ -233,6 +235,50 @@ class MonitorEngineTests(unittest.TestCase):
         ]
         self.assertEqual(pick_chat_target(targets)["webSocketDebuggerUrl"], "ws://b")
         self.assertIsNone(pick_chat_target([{"type": "page", "url": "x"}]))
+
+    def test_doubao_target_accepts_the_desktop_app_scheme(self) -> None:
+        """The shipped client serves its chat on doubao://, never on https.
+
+        Reading only http(s) targets — the rule that used to keep the
+        background page out — matched nothing in the real client and left the
+        CDP channel permanently empty.
+        """
+        targets = [
+            {"type": "page", "url": "doubao://doubao-launcher/chat?viewId=101",
+             "webSocketDebuggerUrl": "ws://launcher"},
+            {"type": "page", "url": "doubao://doubao-background/",
+             "webSocketDebuggerUrl": "ws://bg"},
+            {"type": "page", "url": "chrome://doubao-chat/chat", "webSocketDebuggerUrl": "ws://chat"},
+            {"type": "other", "url": "doubao://doubao-chat/cross-site-support/",
+             "webSocketDebuggerUrl": "ws://frame"},
+        ]
+        ranked = [item["webSocketDebuggerUrl"] for item in chat_targets(targets)]
+        self.assertEqual(ranked, ["ws://chat", "ws://launcher"])
+        self.assertEqual(pick_chat_target(targets)["webSocketDebuggerUrl"], "ws://chat")
+
+    def test_doubao_snapshot_merges_every_open_page(self) -> None:
+        """A stop button in any renderer decides the state for the whole app."""
+        targets = [
+            {"type": "page", "url": "doubao://doubao-chat/chat", "webSocketDebuggerUrl": "ws://chat"},
+            {"type": "page", "url": "doubao://doubao-launcher/chat?viewId=101",
+             "webSocketDebuggerUrl": "ws://launcher"},
+        ]
+        probes = {
+            "ws://chat": {"title": "豆包", "href": "chrome://doubao-chat/chat",
+                          "labels": [], "tail": "有什么我能帮你的吗？"},
+            "ws://launcher": {"title": "季度报告整理 - 豆包", "href": "chrome://doubao-launcher/chat",
+                              "labels": ["停止生成"], "tail": "正在写第二段"},
+        }
+        original_targets, original_probe = doubao_reader.cdp_targets, doubao_reader._probe
+        doubao_reader.cdp_targets = lambda port, timeout=0.8: targets
+        doubao_reader._probe = lambda target, timeout=2.0: probes[target["webSocketDebuggerUrl"]]
+        try:
+            snap = doubao_reader.cdp_snapshot(19226)
+        finally:
+            doubao_reader.cdp_targets, doubao_reader._probe = original_targets, original_probe
+        self.assertEqual(snap["state"], "working")
+        self.assertEqual(snap["title"], "季度报告整理")
+        self.assertEqual(snap["source"], "cdp")
 
     def test_doubao_config_is_off_by_default(self) -> None:
         config = normalize_config({"version": 2, "identity": {"device_id": "sdg-abc-01"}})

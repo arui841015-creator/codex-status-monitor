@@ -272,6 +272,9 @@ class MonitorApp(tk.Tk):
         self.vars["db_port"] = tk.StringVar(value=str(doubao.get("port") or DEFAULT_CDP_PORT))
         self.vars["db_interval"] = tk.StringVar(value=str(doubao.get("interval", 2.0)))
         self.vars["db_exe"] = tk.StringVar(value=str(doubao.get("executable") or ""))
+        # Live read-back: with edge-only publishing an idle Doubao emits
+        # nothing at all, so without this the channel looks dead.
+        self.vars["db_state"] = tk.StringVar(value="")
 
         ttk.Checkbutton(channels, text="Codex Desktop", variable=self.vars["codex_enabled"]).grid(row=0, column=0, sticky="w")
         ttk.Label(channels, text="跟踪任务数").grid(row=0, column=2, sticky="e", padx=(18, 4))
@@ -303,6 +306,10 @@ class MonitorApp(tk.Tk):
         ttk.Button(channels, text="用调试端口启动豆包", command=self._launch_doubao).grid(
             row=8, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=(6, 0)
         )
+        self.doubao_state_label = ttk.Label(
+            channels, textvariable=self.vars["db_state"], foreground="#888", wraplength=340, justify="left",
+        )
+        self.doubao_state_label.grid(row=8, column=4, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(
             channels,
             text="豆包状态有两种读法：① 用左侧按钮把豆包以调试端口启动（最小化、切到后台都能读，最准）；"
@@ -641,6 +648,7 @@ class MonitorApp(tk.Tk):
             self.manager = None
         self.state_label.configure(text="● 已停止", foreground="#a33")
         self.link_label.configure(text="")
+        self.vars["db_state"].set("")
         self._sync_tray()
 
     def _tick(self) -> None:
@@ -661,12 +669,39 @@ class MonitorApp(tk.Tk):
                 if publisher and publisher.last_error:
                     broker += f"（{publisher.last_error}）"
                 self.link_label.configure(text=f"{broker} · " + ("；".join(parts) if parts else "等待首个任务 ..."))
+                self._refresh_doubao_state()
             else:
                 self.link_label.configure(text="填写 Device ID，勾选渠道，点「启动监听」即可。")
+                self.vars["db_state"].set("")
         except Exception:  # noqa: BLE001
             pass
         self._sync_tray()
         self.after(1200, self._tick)
+
+    def _refresh_doubao_state(self) -> None:
+        """Show what the last Doubao poll actually saw, idle included."""
+        section = (self.config_data.get("watch") or {}).get("doubao") or {}
+        if not self.manager or not section.get("enabled"):
+            self.vars["db_state"].set("")
+            return
+        status = self.manager.doubao_status()
+        if not status:
+            self.vars["db_state"].set("● 等待首次读取 ...")
+            self.doubao_state_label.configure(foreground="#888")
+            return
+        if status.get("ok"):
+            source = "调试端口" if status.get("source") == "cdp" else "窗口读取"
+            state = {"idle": "空闲", "thinking": "思考中", "working": "生成中"}.get(status.get("state"), status.get("state"))
+            title = status.get("title") or ""
+            text = f"● 已读到（{source}）· {state}"
+            if title and title not in ("豆包", "Doubao"):
+                text += f"：{title[:18]}"
+            self.vars["db_state"].set(text)
+            self.doubao_state_label.configure(foreground="#0a6" if state != "空闲" else "#4a8")
+        else:
+            reason = str(status.get("error") or "读不到豆包")
+            self.vars["db_state"].set(f"● 读不到：{reason[:40]}")
+            self.doubao_state_label.configure(foreground="#a33")
 
     def _observation(self, item: dict[str, Any]) -> None:
         target = self.incoming_output if item.get("direction") == "incoming" else self.outgoing_output

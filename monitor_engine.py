@@ -53,6 +53,8 @@ STATUS_LABELS = {
 }
 FINAL_STATES = {"worked", "failed", "canceled"}
 ACTIVE_STATES = {"thinking", "working", "responding", "waiting"}
+# Human wording for the log line that confirms the Doubao channel is readable.
+DOUBAO_STATE_LABELS = {"idle": "空闲", "thinking": "思考中", "working": "生成中"}
 WORKBUDDY_STATUS = {
     "pending": "thinking", "queued": "thinking", "created": "thinking",
     "running": "working", "working": "working", "processing": "working",
@@ -522,6 +524,10 @@ class MonitorManager:
         self._states: dict[str, tuple[str, str, str]] = {}
         self._tracked: dict[str, dict[str, dict[str, str]]] = {}
         self._lock = threading.Lock()
+        # Last read of the Doubao channel, so the UI can tell "listening and
+        # idle" apart from "cannot read it at all" — with only edge publishing
+        # an idle Doubao produces no output whatsoever.
+        self._doubao_status: dict[str, Any] = {}
         self.publisher: MQTTOutput | None = None
 
     @property
@@ -569,6 +575,22 @@ class MonitorManager:
     def tracked_summary(self) -> dict[str, Any]:
         with self._lock:
             return json.loads(json.dumps(self._tracked))
+
+    def doubao_status(self) -> dict[str, Any]:
+        """What the last Doubao poll saw: state, title, source or error."""
+        with self._lock:
+            return dict(self._doubao_status)
+
+    def _note_doubao(self, snap: dict[str, Any] | None, error: str = "") -> None:
+        with self._lock:
+            self._doubao_status = {
+                "ok": snap is not None,
+                "state": (snap or {}).get("state", ""),
+                "title": (snap or {}).get("title", ""),
+                "source": (snap or {}).get("source", ""),
+                "error": error,
+                "at": time.time(),
+            }
 
     # ---------------- discovery preview ----------------
 
@@ -742,12 +764,21 @@ class MonitorManager:
         current: dict[str, str] | None = None
         announced = False
         warned = False
+        confirmed = False
         while not self._stop.is_set():
             try:
                 snap = reader.snapshot()
             except Exception as exc:  # noqa: BLE001
                 snap = None
                 reader.last_error = str(exc)
+            self._note_doubao(snap, "" if snap else (reader.last_error or "读不到豆包"))
+            if snap and not confirmed:
+                # One positive line on the first successful read: without it an
+                # idle Doubao looks exactly like a broken channel, because idle
+                # publishes nothing by design.
+                confirmed = True
+                source = "调试端口" if snap.get("source") == "cdp" else "窗口读取"
+                self._emit_log(f"豆包已读到（{source}），当前 {DOUBAO_STATE_LABELS.get(snap.get('state'), snap.get('state'))}")
             current, events = doubao_events(current, snap)
             for state, info in events:
                 extra = {

@@ -48,6 +48,19 @@ THINK_WORDS = (
     "正在查找", "正在检索", "搜集资料", "正在浏览",
 )
 BUSY_WORDS = ("正在生成", "生成中", "正在输出", "正在写作")
+# Window/page titles that name the app instead of a conversation.
+APP_TITLES = ("豆包", "doubao", "豆包ai", "豆包 ai")
+# Renderer pages that exist in every client but never hold a conversation:
+# the background/service surface, the embedded site-support frame and the
+# in-app drive frame. Reading one of these would report an empty title as if
+# it were the current session.
+NON_CHAT_URL_MARKERS = (
+    "doubao-background",
+    "cross-site-support",
+    "drive-iframe",
+    "devtools://",
+    "about:blank",
+)
 
 PROBE_JS = """
 (() => {
@@ -298,27 +311,52 @@ def cdp_targets(port: int, timeout: float = 0.8) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
-def pick_chat_target(targets: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The chat page, out of the several targets a Chromium app exposes.
+def _chat_target_score(url: str) -> int:
+    """How likely this page is the conversation surface. 0 means "not one".
 
-    Non-web pages (``chrome://doubao-background/`` and friends) are skipped:
-    they exist before any conversation is open, and treating one as the chat
-    would report an empty title as if it were the current session.
+    The desktop client no longer serves its chat on https://www.doubao.com.
+    Depending on the build the renderer is addressed as
+    ``doubao://doubao-chat/chat``, ``doubao://doubao-launcher/chat?viewId=101``
+    or ``chrome://doubao-chat/chat``; the old "http(s) only" rule therefore
+    matched nothing at all and every poll fell through to the window reader.
+    Ranking is by surface, because the launcher page is the same app but its
+    text tail is dominated by the sidebar's conversation list.
     """
-    pages = [
-        item for item in targets
-        if item.get("type") == "page"
-        and item.get("webSocketDebuggerUrl")
-        and str(item.get("url") or "").lower().startswith(("http://", "https://"))
-    ]
-    for page in pages:
-        url = str(page.get("url") or "").lower()
-        if "doubao.com" in url and "/chat" in url:
-            return page
-    for page in pages:
-        if "doubao.com" in str(page.get("url") or "").lower():
-            return page
-    return pages[0] if pages else None
+    if any(marker in url for marker in NON_CHAT_URL_MARKERS):
+        return 0
+    if "doubao-chat" in url:
+        return 40
+    if "doubao-launcher" in url:
+        return 30
+    if "doubao.com" in url and "/chat" in url:
+        return 25
+    if "doubao.com" in url:
+        return 10
+    return 0
+
+
+def chat_targets(targets: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
+    """Every page that could be the chat, best first.
+
+    More than one is returned on purpose: the client keeps several renderer
+    windows alive and which one carries the open conversation varies by build,
+    so the caller probes them until one shows a live reply.
+    """
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for index, item in enumerate(targets):
+        if item.get("type") != "page" or not item.get("webSocketDebuggerUrl"):
+            continue
+        score = _chat_target_score(str(item.get("url") or "").lower())
+        if score:
+            scored.append((score, -index, item))
+    scored.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
+    return [item for _score, _order, item in scored[:max(1, limit)]]
+
+
+def pick_chat_target(targets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The single best chat page, out of the targets a Chromium app exposes."""
+    found = chat_targets(targets, limit=1)
+    return found[0] if found else None
 
 
 def evaluate(ws_url: str, expression: str, timeout: float = 4.0) -> Any:
@@ -343,30 +381,70 @@ def evaluate(ws_url: str, expression: str, timeout: float = 4.0) -> Any:
     raise WebSocketError("CDP 未返回结果")
 
 
-def cdp_snapshot(port: int) -> dict[str, Any] | None:
-    target = pick_chat_target(cdp_targets(port))
-    if not target:
-        return None
-    raw = evaluate(str(target["webSocketDebuggerUrl"]), PROBE_JS)
+def _probe(target: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
+    """Run PROBE_JS in one page and decode its answer. Never raises fatally."""
+    raw = evaluate(str(target["webSocketDebuggerUrl"]), PROBE_JS, timeout=timeout)
     try:
-        probe = json.loads(raw) if isinstance(raw, str) else {}
+        return json.loads(raw) if isinstance(raw, str) else {}
     except ValueError:
-        probe = {}
-    text = "\n".join([
+        return {}
+
+
+def _probe_text(probe: dict[str, Any]) -> str:
+    return "\n".join([
         "\n".join(str(item) for item in (probe.get("labels") or [])),
         # Only the live tail is scanned, never the whole transcript: a user or
         # an earlier answer that happens to contain "正在生成" would otherwise
         # pin the state to WORKING forever.
         str(probe.get("tail") or "")[-600:],
     ])
-    state = classify_text(text)
-    title = conversation_title(probe.get("title"))
+
+
+def cdp_snapshot(port: int) -> dict[str, Any] | None:
+    """Read every candidate page and report the most active state seen.
+
+    ``working`` wins across pages: a stop button only exists where tokens are
+    actually streaming, so one page showing it outweighs the others. The title
+    comes from the first page that names a real conversation rather than the
+    bare app name, since the sidebar window keeps the generic title.
+    """
+    targets = chat_targets(cdp_targets(port))
+    if not targets:
+        raise WebSocketError("调试端口已开，但没有可读的豆包对话页面")
+    state = "idle"
+    title = ""
+    session = ""
+    href = ""
+    errors: list[str] = []
+    for target in targets:
+        try:
+            probe = _probe(target)
+        except Exception as exc:  # noqa: BLE001 - one dead page must not stop the poll
+            errors.append(str(exc))
+            continue
+        if not probe:
+            continue
+        candidate = classify_text(_probe_text(probe))
+        if candidate == "working":
+            state = "working"
+        elif candidate == "thinking" and state == "idle":
+            state = "thinking"
+        name = conversation_title(probe.get("title"))
+        if name and name.lower() not in APP_TITLES and not title:
+            title, session, href = name, session_key(probe.get("href"), name), str(probe.get("href") or "")
+        elif not href:
+            href = str(probe.get("href") or "")
+        if state == "working":
+            break  # already the strongest signal; stop paying for more pages
+    if not href and errors and state == "idle":
+        raise WebSocketError("；".join(errors[:2]))
+    final_title = title or conversation_title(targets[0].get("title"))
     return {
         "source": "cdp",
         "state": state,
-        "title": title,
-        "session": session_key(probe.get("href"), title),
-        "url": str(probe.get("href") or ""),
+        "title": final_title,
+        "session": session or session_key(href, final_title),
+        "url": href,
     }
 
 
