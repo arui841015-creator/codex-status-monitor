@@ -20,31 +20,32 @@ UPLOADS = "https://uploads.github.com"
 OWNER = "arui841015-creator"
 REPO = "codex-status-monitor"
 
-BODY = """豆包（Doubao）工作监听通道上线。
-
-## 新增
-
-- **豆包渠道**：与 Codex、Workbuddy 并列的第三个监听渠道，默认不勾选。
-  - **CDP 优先**：连 `127.0.0.1:19226`，跑一次 `Runtime.evaluate` 读会话状态，
-    豆包最小化、切后台都能读。界面里有「用调试端口启动豆包」一键完成（需先退出豆包）。
-  - **窗口兜底**：读不到调试端口时扫可见窗口的控件树，零配置；豆包关到托盘则读不到。
-- 状态由界面措辞判定：`停止生成` / `正在生成` → WORKING，
-  `深度思考` / `正在搜索` / `正在阅读` → THINKING，都不在 → 补发一次 COMPLETED。
-- 中文会话标题哈希成 `DB-XXXXXXXX` 形式，原文保留在 `detail.project_raw`，
-  `message` 仍然只有单行 ASCII。
+BODY = """豆包通道的三处真机问题修复。
 
 ## 修复
 
-- 历史消息里的「正在生成中」曾让设备永久卡在 WORKING —— 现只扫按钮标签与页面末尾 600 字。
-- 「豆包工作精灵」浮窗曾被误认成聊天窗口，导致状态误判、项目名被污染。
-- 探测本地调试端口原来超时 2 秒，拖慢整轮轮询 —— 已缩短。
-- `ctypes.wintypes` 在 macOS 上无法导入，会让 mac 版起不来 —— 已改为按平台惰性导入。
+- **找不到 Doubao.exe**：原来只猜 `%ProgramFiles%` 与 `%LOCALAPPDATA%`，装在
+  `D:`、`F:` 这类非系统盘就找不到。现在按四层依次查找：界面里手填的
+  「豆包可执行文件」→ 正在运行的进程镜像路径 → 安装器写入的注册表
+  （App Paths / Uninstall）→ 所有固定磁盘的常见安装目录。实测本机
+  `F:\\Program Files\\Doubao\\app\\Doubao.exe` 在 0.02 秒内命中。
+  新增可选字段 `watch.doubao.executable`，界面上就是那一栏。
+- **豆包在跑时无法转调试模式**：豆包是单实例，参数注不进去，只能重启。
+  现在点「用调试端口启动豆包」会先弹窗确认，确认后自动关闭豆包
+  （先优雅关闭，6 秒不退出再强制结束）并以调试端口重新打开，
+  实测 16 秒左右端口就绪、CDP 可读。
+- **日志看不懂**：`<urlopen error timed out>` 换成「调试端口 19226 未开放」，
+  并且先做 0.25 秒 socket 探活，单轮探测从 0.8 秒降到 0.26 秒。
+
+## 另外修掉
+
+- CDP 目标列表里的 `chrome://doubao-background/` 这类内部页曾被当成聊天页，
+  在没有打开任何会话时会报出空标题的假状态。现在只认 http(s) 页面。
 
 ## 说明
 
-- 本版仅提供 Windows x64。豆包的窗口兜底依赖 Windows UIA，macOS 只能走调试端口且未真机验证，
-  所以 macOS 仍停在 v2.2.0。
-- 升级时先在托盘退出旧版，再用新包覆盖；「随系统自动启动」需取消后再勾选一次。
+- 本版仅 Windows x64；macOS 仍停在 v2.2.0（豆包的窗口兜底依赖 Windows UIA）。
+- 升级：先在托盘退出旧版，再用新包覆盖；自启动项若指向旧路径，取消后再勾选一次。
 """
 
 
@@ -118,7 +119,7 @@ def main() -> int:
         {
             "tag_name": tag,
             "target_commitish": commit,
-            "name": f"v2.3.0 · 增加豆包工作监听",
+            "name": f"{tag} · 豆包通道修复",
             "body": BODY,
             "draft": draft,
             "prerelease": False,
