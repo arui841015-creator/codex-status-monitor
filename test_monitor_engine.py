@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -22,7 +23,17 @@ from monitor_engine import (
     workbuddy_recency,
     workbuddy_state,
 )
-from doubao_reader import classify_text, conversation_title, pick_chat_target, session_key
+from doubao_reader import (
+    WebSocketError,
+    _exe_from,
+    cdp_targets,
+    classify_text,
+    conversation_title,
+    debug_port_ready,
+    doubao_exe_path,
+    pick_chat_target,
+    session_key,
+)
 
 
 class RecordingPublisher:
@@ -260,6 +271,39 @@ class MonitorEngineTests(unittest.TestCase):
         self.assertNotIn("\n", payload["message"])
         self.assertEqual(payload["detail"]["project_raw"], "季度报告整理")
         self.assertEqual(payload["detail"]["status_label"], "WORKING")
+
+    def test_doubao_exe_is_found_off_the_system_drive(self) -> None:
+        """A bare folder, an exe and a quoted DisplayIcon all resolve to the exe."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            nested = root / "Doubao" / "app"
+            nested.mkdir(parents=True)
+            exe = nested / "Doubao.exe"
+            exe.write_bytes(b"MZ")
+            self.assertEqual(_exe_from(root), exe)
+            self.assertEqual(_exe_from(f'"{root}",0'), exe)
+            self.assertEqual(_exe_from(exe), exe)
+            self.assertIsNone(_exe_from(root / "missing"))
+            self.assertIsNone(_exe_from(""))
+
+    def test_configured_doubao_exe_wins_and_is_kept_in_config(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            exe = Path(folder) / "Doubao.exe"
+            exe.write_bytes(b"MZ")
+            self.assertEqual(doubao_exe_path(exe), str(exe))
+        # A wrong path must not stop the discovery fallbacks.
+        self.assertNotEqual(doubao_exe_path(r"Z:\nowhere\Doubao.exe"), r"Z:\nowhere\Doubao.exe")
+        config = normalize_config({"watch": {"doubao": {"executable": f" {exe} "}}})
+        self.assertEqual(config["watch"]["doubao"]["executable"], str(exe))
+        self.assertEqual(normalize_config({})["watch"]["doubao"]["executable"], "")
+
+    def test_debug_port_probe_fails_fast(self) -> None:
+        started = time.time()
+        with self.assertRaises(WebSocketError) as caught:
+            cdp_targets(1, timeout=0.2)  # port 1 is never a DevTools endpoint
+        self.assertLess(time.time() - started, 1.5)
+        self.assertIn("未开放", str(caught.exception))
+        self.assertFalse(debug_port_ready(1, timeout=0.2))
 
 
 if __name__ == "__main__":

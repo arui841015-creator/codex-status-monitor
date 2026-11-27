@@ -23,6 +23,7 @@ import logging
 import os
 import socket
 import struct
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -270,20 +271,46 @@ def _no_proxy_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def port_open(port: int, timeout: float = 0.25, host: str = CDP_HOST) -> bool:
+    """Cheap liveness probe before paying for an HTTP round trip.
+
+    A closed port is refused instantly on most machines but some security
+    stacks simply drop the SYN, so the probe has its own short budget: a poll
+    must never wait a full HTTP timeout just to learn nothing is listening.
+    """
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def cdp_targets(port: int, timeout: float = 0.8) -> list[dict[str, Any]]:
     """DevTools target list. Short timeout: a closed port must not stall a poll."""
+    if not port_open(port, timeout=min(0.25, timeout)):
+        raise WebSocketError(f"调试端口 {port} 未开放")
     url = f"http://{CDP_HOST}:{port}/json/list"
     try:
         with _no_proxy_opener().open(url, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8", "replace"))
     except (OSError, ValueError) as exc:
-        raise WebSocketError(f"调试端口未就绪：{exc}") from exc
+        raise WebSocketError(f"调试端口 {port} 无响应（{exc}）") from exc
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
 def pick_chat_target(targets: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The chat page, out of the several targets a Chromium app exposes."""
-    pages = [item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")]
+    """The chat page, out of the several targets a Chromium app exposes.
+
+    Non-web pages (``chrome://doubao-background/`` and friends) are skipped:
+    they exist before any conversation is open, and treating one as the chat
+    would report an empty title as if it were the current session.
+    """
+    pages = [
+        item for item in targets
+        if item.get("type") == "page"
+        and item.get("webSocketDebuggerUrl")
+        and str(item.get("url") or "").lower().startswith(("http://", "https://"))
+    ]
     for page in pages:
         url = str(page.get("url") or "").lower()
         if "doubao.com" in url and "/chat" in url:
@@ -491,8 +518,98 @@ def uia_snapshot() -> dict[str, Any] | None:
 # --------------------------------------------------------------------------
 
 
-def doubao_exe_path() -> str | None:
-    """Full path of the Doubao desktop executable, if it is installed/running."""
+def _fixed_drive_roots() -> list[str]:
+    """Roots of the fixed disks, so an install on D:/F: is still found."""
+    if os.name != "nt":
+        return []
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetLogicalDrives.restype = ctypes.c_uint
+    kernel32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
+    mask = int(kernel32.GetLogicalDrives())
+    roots: list[str] = []
+    for index in range(26):
+        if not mask & (1 << index):
+            continue
+        root = f"{chr(ord('A') + index)}:\\"
+        if kernel32.GetDriveTypeW(root) == 3:  # DRIVE_FIXED
+            roots.append(root)
+    return roots
+
+
+def _exe_from(raw: object) -> Path | None:
+    """Turn a loose value (exe, folder, or ``"path",0``) into Doubao.exe."""
+    text = str(raw or "").strip().strip('"')
+    if not text:
+        return None
+    text = text.split(",")[0].strip().strip('"')
+    path = Path(text)
+    if path.name.lower() == "doubao.exe":
+        return path
+    for suffix in ("Doubao.exe", "app/Doubao.exe", "Doubao/Doubao.exe", "Doubao/app/Doubao.exe"):
+        candidate = path / suffix
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _reg_value(key: Any, name: str) -> str | None:
+    import winreg
+
+    try:
+        value = winreg.QueryValueEx(key, name)[0]
+    except OSError:
+        return None
+    return str(value) if value else None
+
+
+def _registry_candidates() -> list[Path]:
+    """Paths Doubao's installer recorded (App Paths and Uninstall entries)."""
+    if os.name != "nt":
+        return []
+    import winreg
+
+    found: list[Path] = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        key = r"Software\Microsoft\Windows\CurrentVersion\App Paths\Doubao.exe"
+        try:
+            with winreg.OpenKey(hive, key) as handle:
+                value = _reg_value(handle, "")
+                if value:
+                    found.append(Path(value.strip('"')))
+        except OSError:
+            continue
+    for hive, key in (
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as root:
+                names = []
+                for index in range(winreg.QueryInfoKey(root)[0]):
+                    try:
+                        names.append(winreg.EnumKey(root, index))
+                    except OSError:
+                        break
+        except OSError:
+            continue
+        for name in names:
+            try:
+                with winreg.OpenKey(hive, f"{key}\\{name}") as sub:
+                    display = _reg_value(sub, "DisplayName") or ""
+                    if "豆包" not in display and "doubao" not in display.lower():
+                        continue
+                    for field in ("DisplayIcon", "InstallLocation"):
+                        value = _reg_value(sub, field)
+                        if value:
+                            found.append(Path(value.strip('"')))
+            except OSError:
+                continue
+    return found
+
+
+def _running_doubao_exe() -> str | None:
+    """Image path of the running Doubao — always the truth when it is up."""
     if os.name != "nt":
         return None
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -515,14 +632,47 @@ def doubao_exe_path() -> str | None:
                     return path
         finally:
             kernel32.CloseHandle(handle)
-    for guess in (
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Doubao" / "app" / "Doubao.exe",
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Doubao" / "app" / "Doubao.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Doubao" / "Application" / "Doubao.exe",
-    ):
-        if guess.is_file():
-            return str(guess)
     return None
+
+
+def doubao_exe_path(configured: object = None) -> str | None:
+    """Full path of the Doubao executable.
+
+    Order matters: an explicit setting wins, then the running process (always
+    right), then the installer's own records, then the usual folders on every
+    fixed drive — Doubao is often installed on a spare disk, so ``%ProgramFiles%``
+    alone is not enough.
+    """
+    if os.name != "nt":
+        return None
+    explicit = _exe_from(configured)
+    if explicit and explicit.is_file():
+        return str(explicit)
+    running = _running_doubao_exe()
+    if running:
+        return running
+    guesses: list[Path] = _registry_candidates()
+    for root in _fixed_drive_roots():
+        guesses.append(Path(root) / "Program Files" / "Doubao" / "app" / "Doubao.exe")
+        guesses.append(Path(root) / "Program Files (x86)" / "Doubao" / "app" / "Doubao.exe")
+        guesses.append(Path(root) / "Program Files" / "Doubao" / "Doubao.exe")
+        guesses.append(Path(root) / "Doubao" / "app" / "Doubao.exe")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        guesses.append(Path(local) / "Doubao" / "Application" / "Doubao.exe")
+        guesses.append(Path(local) / "Programs" / "Doubao" / "Doubao.exe")
+    roaming = os.environ.get("APPDATA")
+    if roaming:
+        guesses.append(Path(roaming) / "Doubao" / "Doubao.exe")
+    for guess in guesses:
+        resolved = _exe_from(guess)
+        if resolved and resolved.is_file():
+            return str(resolved)
+    return None
+
+
+class DoubaoRunning(RuntimeError):
+    """Doubao is up without a debug port, so it has to be restarted."""
 
 
 def debug_port_ready(port: int, timeout: float = 1.0) -> bool:
@@ -532,28 +682,75 @@ def debug_port_ready(port: int, timeout: float = 1.0) -> bool:
         return False
 
 
-def launch_debug(port: int = DEFAULT_CDP_PORT) -> str:
+def quit_doubao(timeout: float = 6.0) -> bool:
+    """Close Doubao so it can come back with the debug flag.
+
+    Tries a graceful close first — the tray icon honours it — and only falls
+    back to a forced kill if the app refuses to go. Returns True when no Doubao
+    process is left.
+    """
+    import subprocess
+
+    if not doubao_pids():
+        return True
+    flags = 0x08000000  # CREATE_NO_WINDOW: no console flash
+    subprocess.run(["taskkill", "/IM", "Doubao.exe"], capture_output=True,
+                   creationflags=flags, timeout=20)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not doubao_pids():
+            return True
+        time.sleep(0.4)
+    subprocess.run(["taskkill", "/F", "/IM", "Doubao.exe"], capture_output=True,
+                   creationflags=flags, timeout=20)
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        if not doubao_pids():
+            return True
+        time.sleep(0.3)
+    return not doubao_pids()
+
+
+def launch_debug(
+    port: int = DEFAULT_CDP_PORT,
+    configured_exe: object = None,
+    allow_restart: bool = False,
+    wait: float = 2.5,
+) -> str:
     """Start Doubao with its debug port open. Returns a human readable status.
 
-    Doubao is single-instance: if it is already running without the flag, the
-    flag cannot be injected, so the caller has to quit it first. That is why
-    this refuses instead of silently relaunching something the user is using.
+    Doubao is single-instance, so the flag cannot be injected into a running
+    copy. With ``allow_restart`` the caller has already asked the user and the
+    running app is closed first; otherwise ``DoubaoRunning`` lets the UI explain
+    the choice instead of silently killing something the user is typing in.
     """
     import subprocess
 
     if debug_port_ready(port):
         return f"豆包调试端口 {port} 已在监听，无需重新启动"
     if doubao_pids():
-        raise RuntimeError("豆包已在运行，但不是调试模式。请先从托盘退出豆包，再点此按钮。")
-    exe = doubao_exe_path()
+        if not allow_restart:
+            raise DoubaoRunning("豆包已在运行，但不是调试模式。需要先关闭它再以调试模式重启。")
+        if not quit_doubao():
+            raise RuntimeError("无法关闭正在运行的豆包，请从托盘退出后重试")
+    exe = doubao_exe_path(configured_exe)
     if not exe:
-        raise FileNotFoundError("找不到 Doubao.exe，请确认豆包电脑版已安装")
+        raise FileNotFoundError(
+            "找不到 Doubao.exe。请在「豆包可执行文件」里填写完整路径（例如 "
+            r"F:\Program Files\Doubao\app\Doubao.exe）"
+        )
     subprocess.Popen(
         [exe, "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}"],
+        cwd=os.path.dirname(exe) or None,
         creationflags=0x00000008,  # DETACHED_PROCESS: Doubao is its own app
         close_fds=True,
     )
-    return f"已用调试端口 {port} 启动豆包，首次连接可能需要几秒"
+    deadline = time.time() + max(0.0, wait)
+    while time.time() < deadline:
+        if debug_port_ready(port, timeout=0.3):
+            return f"已用调试端口 {port} 重启豆包，可以最小化或收进托盘了"
+        time.sleep(0.3)
+    return f"已启动豆包，正在等待调试端口 {port} 就绪（首次通常几秒）"
 
 
 class DoubaoReader:

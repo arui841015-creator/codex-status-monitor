@@ -12,12 +12,12 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
 import autostart
-from doubao_reader import DEFAULT_CDP_PORT, launch_debug
+from doubao_reader import DEFAULT_CDP_PORT, DoubaoRunning, launch_debug
 from monitor_engine import (
     DEFAULT_CONFIG,
     DEFAULT_DATABASE,
@@ -271,6 +271,7 @@ class MonitorApp(tk.Tk):
         self.vars["db_enabled"] = tk.BooleanVar(value=bool(doubao.get("enabled", False)))
         self.vars["db_port"] = tk.StringVar(value=str(doubao.get("port") or DEFAULT_CDP_PORT))
         self.vars["db_interval"] = tk.StringVar(value=str(doubao.get("interval", 2.0)))
+        self.vars["db_exe"] = tk.StringVar(value=str(doubao.get("executable") or ""))
 
         ttk.Checkbutton(channels, text="Codex Desktop", variable=self.vars["codex_enabled"]).grid(row=0, column=0, sticky="w")
         ttk.Label(channels, text="跟踪任务数").grid(row=0, column=2, sticky="e", padx=(18, 4))
@@ -295,22 +296,27 @@ class MonitorApp(tk.Tk):
         ttk.Entry(channels, width=8, textvariable=self.vars["db_port"]).grid(row=6, column=3, sticky="w")
         ttk.Label(channels, text="轮询秒").grid(row=6, column=4, sticky="w", padx=(12, 4))
         ttk.Entry(channels, width=6, textvariable=self.vars["db_interval"]).grid(row=6, column=5, sticky="w")
+        ttk.Label(channels, text="豆包可执行文件").grid(row=7, column=2, sticky="e", padx=(18, 4), pady=(4, 0))
+        ttk.Entry(channels, textvariable=self.vars["db_exe"]).grid(
+            row=7, column=3, columnspan=3, sticky="ew", pady=(4, 0)
+        )
         ttk.Button(channels, text="用调试端口启动豆包", command=self._launch_doubao).grid(
-            row=7, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=(6, 0)
+            row=8, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=(6, 0)
         )
         ttk.Label(
             channels,
             text="豆包状态有两种读法：① 用左侧按钮把豆包以调试端口启动（最小化、切到后台都能读，最准）；"
-                 "② 什么都不做，只要豆包窗口开着也能读。窗口关到托盘又没有调试端口时读不到，此时不会误报。",
+                 "② 什么都不做，只要豆包窗口开着也能读。窗口关到托盘又没有调试端口时读不到，此时不会误报。"
+                 "可执行文件留空即自动查找（含非系统盘安装）。",
             foreground="#666", wraplength=720, justify="left",
-        ).grid(row=8, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        ).grid(row=9, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
         hint = ttk.Label(
             channels,
             text="无需选择具体任务：程序会自动取每个渠道最新的 N 个任务，出现新任务时自动接管，并把最旧的顶掉。",
             foreground="#666",
         )
-        hint.grid(row=9, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        hint.grid(row=10, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
         advanced = ttk.LabelFrame(tab, text="③ MQTT Broker（默认可用，可按需修改）", padding=12)
         advanced.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -431,6 +437,7 @@ class MonitorApp(tk.Tk):
             "enabled": bool(self.vars["db_enabled"].get()),
             "interval": db_interval,
             "port": db_port,
+            "executable": str(self.vars["db_exe"].get()).strip(),
         }
         if not enabled_platforms(config):
             raise ValueError("请至少勾选一个监听渠道")
@@ -498,22 +505,74 @@ class MonitorApp(tk.Tk):
     # ---------------- actions ----------------
 
     def _launch_doubao(self) -> None:
-        """Start Doubao with its debug port so state is readable in the background."""
+        """Start Doubao with its debug port so state is readable in the background.
+
+        Doubao is single-instance, so a copy that is already running without the
+        flag has to be replaced. That is a destructive step (the user may be
+        mid-conversation) and is therefore never taken without an explicit yes.
+        """
         try:
             port = int(str(self.vars["db_port"].get()).strip() or DEFAULT_CDP_PORT)
         except ValueError:
             messagebox.showerror("端口无效", "豆包调试端口必须是数字")
             return
+        exe = str(self.vars["db_exe"].get()).strip()
         try:
-            message = launch_debug(port)
-        except FileNotFoundError as exc:
-            messagebox.showerror("找不到豆包", str(exc))
-            return
+            message = launch_debug(port, configured_exe=exe, allow_restart=False)
+        except DoubaoRunning:
+            if not messagebox.askyesno(
+                "豆包正在运行",
+                "豆包正在运行，但不是调试模式，无法直接注入参数。\n\n"
+                "是否关闭豆包并以调试模式重新打开？\n"
+                "（输入框里没发送的内容可能会丢失）",
+            ):
+                self._log("已取消：豆包仍在普通模式运行，只能靠窗口读取")
+                return
+            try:
+                message = launch_debug(port, configured_exe=exe, allow_restart=True)
+            except FileNotFoundError:
+                message = self._pick_doubao_exe(port)
+                if not message:
+                    return
+            except (OSError, RuntimeError) as exc:
+                messagebox.showwarning("未启动", str(exc))
+                return
+        except FileNotFoundError:
+            message = self._pick_doubao_exe(port)
+            if not message:
+                return
         except (OSError, RuntimeError) as exc:
             messagebox.showwarning("未启动", str(exc))
             return
         self._log(message)
         self.vars["db_enabled"].set(True)
+
+    def _pick_doubao_exe(self, port: int) -> str:
+        """Let the user point at Doubao.exe once, then remember it in the config."""
+        if not messagebox.askyesno(
+            "找不到豆包",
+            "自动查找没有找到 Doubao.exe。\n\n"
+            "要手动指定吗？通常位于安装目录的 app 子目录下，例如\n"
+            r"F:\Program Files\Doubao\app\Doubao.exe",
+        ):
+            return ""
+        path = filedialog.askopenfilename(
+            title="选择 Doubao.exe",
+            filetypes=[("Doubao", "Doubao.exe"), ("可执行文件", "*.exe")],
+        )
+        if not path:
+            return ""
+        self.vars["db_exe"].set(path)
+        try:
+            message = launch_debug(port, configured_exe=path, allow_restart=True)
+        except (OSError, RuntimeError) as exc:
+            messagebox.showwarning("未启动", str(exc))
+            return ""
+        try:
+            self._persist(self._collect_config())
+        except ValueError:
+            pass
+        return message
 
     def _preview(self) -> None:
         try:

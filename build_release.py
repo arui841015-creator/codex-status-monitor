@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 OUT_SOURCE = ROOT.parent / "codex-status-monitor-release.zip"
 OUT_USER = ROOT.parent / f"CodexStatusMonitor-v{APP_VERSION}-win64.zip"
 FILES = [
@@ -82,8 +82,11 @@ Device ID 就是设备的唯一编号（例如 sdg-ecda3b6717f0），
   「跟踪任务数」默认 1，即每个渠道只跟踪最新的那条任务；
   改成 N 则跟踪最新 N 条，出现新任务时自动接管、最旧的自动移出。
   豆包没有这一项：它只有界面上当前这一个会话。豆包默认不勾选，
-  勾上后只要窗口开着就能读；想让它最小化也能读，就点「用调试端口
-  启动豆包」（需先退出豆包，否则单实例参数注入不进去）。
+  勾上后只要窗口开着就能读；想让它最小化/收进托盘也能读，就点
+  「用调试端口启动豆包」—— 若豆包正以普通模式运行，会先弹窗确认，
+  再自动关闭并以调试模式重开（没发送的内容可能丢失）。
+  「豆包可执行文件」留空即可自动查找，装在非系统盘（D:/F:）也能找到；
+  特殊安装位置可以手动填 app 目录下的 Doubao.exe。
 - ③ MQTT Broker：已预填默认服务器，需要时才改。
 - ④ 启动方式：勾选「随系统自动启动」，只写入当前用户的启动项
   （HKCU\\...\\Run），不需要管理员权限，也不改系统设置。

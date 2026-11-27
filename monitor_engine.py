@@ -108,6 +108,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled": False,
             "interval": 2.0,
             "port": DEFAULT_CDP_PORT,
+            # Empty means "find it": the running process, the installer's own
+            # registry records, then every fixed drive are searched in turn.
+            # Users with a portable/custom install can pin the path here.
+            "executable": "",
         },
     },
 }
@@ -285,6 +289,7 @@ def normalize_config(raw: object) -> dict[str, Any]:
             except (TypeError, ValueError):
                 port = DEFAULT_CDP_PORT
             section["port"] = port if 1 <= port <= 65535 else DEFAULT_CDP_PORT
+            section["executable"] = str(section.get("executable") or "").strip()
         try:
             section["interval"] = max(0.2, float(section.get("interval") or 1.0))
         except (TypeError, ValueError):
@@ -763,7 +768,10 @@ class MonitorManager:
             if snap is None and not warned:
                 warned = True
                 reason = reader.last_error or "既没有调试端口，也没有打开的豆包窗口"
-                self._emit_log(f"豆包暂不可读：{reason}；可用 --remote-debugging-port={port} 启动豆包")
+                self._emit_log(
+                    f"豆包暂不可读：{reason}。"
+                    f"要么让豆包窗口保持打开，要么点「用调试端口启动豆包」以调试模式重启它"
+                )
             elif snap is not None:
                 warned = False
             self._stop.wait(delay)
