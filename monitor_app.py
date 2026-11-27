@@ -17,10 +17,12 @@ from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
 import autostart
+from doubao_reader import DEFAULT_CDP_PORT, launch_debug
 from monitor_engine import (
     DEFAULT_CONFIG,
     DEFAULT_DATABASE,
     DEFAULT_MAX_TASKS,
+    PLATFORMS,
     MonitorManager,
     enabled_platforms,
     normalize_config,
@@ -181,7 +183,7 @@ class MonitorApp(tk.Tk):
         # a window on the desktop.
         if start_minimized:
             self.withdraw()
-        self.title("Codex Status Monitor · Codex / Workbuddy → MQTT")
+        self.title("Codex Status Monitor · Codex / Workbuddy / 豆包 → MQTT")
         self.geometry("1020x720")
         self.minsize(900, 620)
         self.config_data = self._load_config()
@@ -265,6 +267,10 @@ class MonitorApp(tk.Tk):
         self.vars["wb_max"] = tk.StringVar(value=str(workbuddy.get("max_tasks", DEFAULT_MAX_TASKS)))
         self.vars["wb_interval"] = tk.StringVar(value=str(workbuddy.get("interval", 2.0)))
         self.vars["wb_db"] = tk.StringVar(value=str(workbuddy.get("database") or DEFAULT_DATABASE))
+        doubao = self.config_data["watch"]["doubao"]
+        self.vars["db_enabled"] = tk.BooleanVar(value=bool(doubao.get("enabled", False)))
+        self.vars["db_port"] = tk.StringVar(value=str(doubao.get("port") or DEFAULT_CDP_PORT))
+        self.vars["db_interval"] = tk.StringVar(value=str(doubao.get("interval", 2.0)))
 
         ttk.Checkbutton(channels, text="Codex Desktop", variable=self.vars["codex_enabled"]).grid(row=0, column=0, sticky="w")
         ttk.Label(channels, text="跟踪任务数").grid(row=0, column=2, sticky="e", padx=(18, 4))
@@ -283,12 +289,28 @@ class MonitorApp(tk.Tk):
         ttk.Label(channels, text="数据库").grid(row=4, column=2, sticky="e", padx=(18, 4))
         ttk.Entry(channels, textvariable=self.vars["wb_db"]).grid(row=4, column=3, columnspan=3, sticky="ew")
 
+        ttk.Separator(channels).grid(row=5, column=0, columnspan=6, sticky="ew", pady=8)
+        ttk.Checkbutton(channels, text="豆包（Doubao）", variable=self.vars["db_enabled"]).grid(row=6, column=0, sticky="w")
+        ttk.Label(channels, text="调试端口").grid(row=6, column=2, sticky="e", padx=(18, 4))
+        ttk.Entry(channels, width=8, textvariable=self.vars["db_port"]).grid(row=6, column=3, sticky="w")
+        ttk.Label(channels, text="轮询秒").grid(row=6, column=4, sticky="w", padx=(12, 4))
+        ttk.Entry(channels, width=6, textvariable=self.vars["db_interval"]).grid(row=6, column=5, sticky="w")
+        ttk.Button(channels, text="用调试端口启动豆包", command=self._launch_doubao).grid(
+            row=7, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=(6, 0)
+        )
+        ttk.Label(
+            channels,
+            text="豆包状态有两种读法：① 用左侧按钮把豆包以调试端口启动（最小化、切到后台都能读，最准）；"
+                 "② 什么都不做，只要豆包窗口开着也能读。窗口关到托盘又没有调试端口时读不到，此时不会误报。",
+            foreground="#666", wraplength=720, justify="left",
+        ).grid(row=8, column=0, columnspan=6, sticky="w", pady=(6, 0))
+
         hint = ttk.Label(
             channels,
             text="无需选择具体任务：程序会自动取每个渠道最新的 N 个任务，出现新任务时自动接管，并把最旧的顶掉。",
             foreground="#666",
         )
-        hint.grid(row=5, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        hint.grid(row=9, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
         advanced = ttk.LabelFrame(tab, text="③ MQTT Broker（默认可用，可按需修改）", padding=12)
         advanced.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -375,8 +397,12 @@ class MonitorApp(tk.Tk):
             wb_max = max(1, min(10, int(str(self.vars["wb_max"].get()).strip())))
             codex_interval = max(0.2, float(str(self.vars["codex_interval"].get()).strip() or 1.5))
             wb_interval = max(0.2, float(str(self.vars["wb_interval"].get()).strip() or 2.0))
+            db_port = int(str(self.vars["db_port"].get()).strip() or DEFAULT_CDP_PORT)
+            db_interval = max(0.5, float(str(self.vars["db_interval"].get()).strip() or 2.0))
         except ValueError as exc:
-            raise ValueError("跟踪任务数或轮询秒必须是数字") from exc
+            raise ValueError("跟踪任务数、轮询秒或调试端口必须是数字") from exc
+        if not 1 <= db_port <= 65535:
+            raise ValueError("豆包调试端口范围为 1-65535")
         config = normalize_config(self.config_data)
         config["identity"] = {"device_id": device_id}
         config["mqtt"] = {
@@ -400,6 +426,11 @@ class MonitorApp(tk.Tk):
             "max_tasks": wb_max,
             "interval": wb_interval,
             "database": str(self.vars["wb_db"].get()).strip() or DEFAULT_DATABASE,
+        }
+        config["watch"]["doubao"] = {
+            "enabled": bool(self.vars["db_enabled"].get()),
+            "interval": db_interval,
+            "port": db_port,
         }
         if not enabled_platforms(config):
             raise ValueError("请至少勾选一个监听渠道")
@@ -465,6 +496,24 @@ class MonitorApp(tk.Tk):
             self._log("下次登录将自动在后台监听，窗口只驻留系统托盘")
 
     # ---------------- actions ----------------
+
+    def _launch_doubao(self) -> None:
+        """Start Doubao with its debug port so state is readable in the background."""
+        try:
+            port = int(str(self.vars["db_port"].get()).strip() or DEFAULT_CDP_PORT)
+        except ValueError:
+            messagebox.showerror("端口无效", "豆包调试端口必须是数字")
+            return
+        try:
+            message = launch_debug(port)
+        except FileNotFoundError as exc:
+            messagebox.showerror("找不到豆包", str(exc))
+            return
+        except (OSError, RuntimeError) as exc:
+            messagebox.showwarning("未启动", str(exc))
+            return
+        self._log(message)
+        self.vars["db_enabled"].set(True)
 
     def _preview(self) -> None:
         try:
@@ -541,12 +590,13 @@ class MonitorApp(tk.Tk):
             if self.manager and self.manager.running:
                 summary = self.manager.tracked_summary()
                 parts = []
-                for platform, label in (("codex", "Codex"), ("workbuddy", "Workbuddy")):
+                labels_map = {"codex": "Codex", "workbuddy": "Workbuddy", "doubao": "豆包"}
+                for platform in PLATFORMS:
                     items = summary.get(platform) or {}
                     if not items:
                         continue
                     labels = "、".join(f"{item['project']}[{item['state']}]" for item in items.values())
-                    parts.append(f"{label} {len(items)}: {labels}")
+                    parts.append(f"{labels_map[platform]} {len(items)}: {labels}")
                 publisher = self.manager.publisher
                 broker = "MQTT 已连接" if publisher and publisher.connected else "MQTT 连接中"
                 if publisher and publisher.last_error:

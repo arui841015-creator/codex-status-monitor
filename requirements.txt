@@ -3,3 +3,6 @@ pystray>=0.19.5
 pillow>=10.0
 # pystray's macOS backend is a thin wrapper over AppKit (NSStatusBar).
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+# Window-level fallback for the Doubao channel: reads its UI tree when no
+# debug port is open. Without it that channel still works, via CDP only.
+uiautomation>=2.0.29; sys_platform == "win32"

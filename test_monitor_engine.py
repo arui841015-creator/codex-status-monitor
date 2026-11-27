@@ -9,6 +9,7 @@ from monitor_engine import (
     MonitorManager,
     codex_recency,
     codex_state,
+    doubao_events,
     enabled_platforms,
     evicted_ids,
     make_detail,
@@ -21,6 +22,7 @@ from monitor_engine import (
     workbuddy_recency,
     workbuddy_state,
 )
+from doubao_reader import classify_text, conversation_title, pick_chat_target, session_key
 
 
 class RecordingPublisher:
@@ -189,6 +191,75 @@ class MonitorEngineTests(unittest.TestCase):
             rows = read_workbuddy_sessions(database)
             self.assertEqual(rows[0]["id"], "real-session")
             self.assertEqual(project_name(rows[0]["cwd"], rows[0]["title"]), "demo")
+
+    # ---- Doubao channel ----
+
+    def test_doubao_state_words(self) -> None:
+        self.assertEqual(classify_text("ButtonControl\t停止生成"), "working")
+        self.assertEqual(classify_text("正在生成中"), "working")
+        self.assertEqual(classify_text("深度思考中"), "thinking")
+        self.assertEqual(classify_text("正在阅读 3 篇资料"), "thinking")
+        self.assertEqual(classify_text("历史对话\n最近对话"), "idle")
+        self.assertEqual(classify_text(""), "idle")
+
+    def test_doubao_identity_is_ascii_only(self) -> None:
+        self.assertEqual(conversation_title("季度报告整理 - 豆包"), "季度报告整理")
+        self.assertEqual(conversation_title("Weekly report - Doubao"), "Weekly report")
+        self.assertEqual(conversation_title("豆包"), "豆包")
+        # A Chinese title cannot ride in the single-line ASCII message, so the
+        # id becomes a stable hash while the readable text stays in detail.*_raw.
+        hashed = session_key("", "季度报告整理 - 豆包")
+        self.assertTrue(hashed.isascii())
+        self.assertEqual(hashed, session_key("", "季度报告整理 - 豆包"))
+        self.assertEqual(session_key("https://www.doubao.com/chat/7412?x=1", "忽略"), "7412")
+        self.assertEqual(session_key("", ""), "main")
+
+    def test_doubao_target_prefers_the_chat_page(self) -> None:
+        targets = [
+            {"type": "page", "url": "https://www.doubao.com/", "webSocketDebuggerUrl": "ws://a"},
+            {"type": "page", "url": "https://www.doubao.com/chat/9", "webSocketDebuggerUrl": "ws://b"},
+            {"type": "service_worker", "url": "https://www.doubao.com/sw.js", "webSocketDebuggerUrl": "ws://c"},
+        ]
+        self.assertEqual(pick_chat_target(targets)["webSocketDebuggerUrl"], "ws://b")
+        self.assertIsNone(pick_chat_target([{"type": "page", "url": "x"}]))
+
+    def test_doubao_config_is_off_by_default(self) -> None:
+        config = normalize_config({"version": 2, "identity": {"device_id": "sdg-abc-01"}})
+        self.assertFalse(config["watch"]["doubao"]["enabled"])
+        self.assertEqual(config["watch"]["doubao"]["port"], 19226)
+        self.assertNotIn("max_tasks", config["watch"]["doubao"])
+        self.assertEqual(enabled_platforms(config), ["codex", "workbuddy"])
+        clamped = normalize_config({"watch": {"doubao": {"enabled": True, "port": 99999}}})
+        self.assertEqual(clamped["watch"]["doubao"]["port"], 19226)
+        self.assertTrue(clamped["watch"]["doubao"]["enabled"])
+        self.assertEqual(enabled_platforms(clamped), ["codex", "workbuddy", "doubao"])
+
+    def test_doubao_state_machine_reports_each_edge_once(self) -> None:
+        self.assertEqual(doubao_events(None, None), (None, []))
+        working = {"state": "working", "session": "7412", "title": "季度报告整理", "source": "cdp"}
+        previous, events = doubao_events(None, working)
+        self.assertEqual([state for state, _ in events], ["working"])
+        self.assertEqual(events[0][1]["session"], "7412")
+        # Same poll twice must not republish.
+        previous, events = doubao_events(previous, working)
+        self.assertEqual(events, [])
+        idle = {"state": "idle", "session": "7412", "title": "季度报告整理", "source": "cdp"}
+        previous, events = doubao_events(previous, idle)
+        self.assertEqual([state for state, _ in events], ["worked"])
+        self.assertIsNone(previous)
+        # Losing the source entirely also closes the conversation.
+        previous, events = doubao_events({"state": "thinking", "session": "a", "title": "A"}, None)
+        self.assertEqual([state for state, _ in events], ["worked"])
+        self.assertIsNone(previous)
+
+    def test_doubao_payload_stays_single_line_ascii(self) -> None:
+        manager = self._manager()
+        manager._publish("Doubao", session_key("", "季度报告整理 - 豆包"), "季度报告整理", "季度报告整理", "working", {})
+        payload = manager.publisher.payloads[0]
+        self.assertTrue(payload["message"].isascii())
+        self.assertNotIn("\n", payload["message"])
+        self.assertEqual(payload["detail"]["project_raw"], "季度报告整理")
+        self.assertEqual(payload["detail"]["status_label"], "WORKING")
 
 
 if __name__ == "__main__":

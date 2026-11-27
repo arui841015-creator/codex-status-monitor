@@ -4,18 +4,19 @@
 
 - Codex Desktop 指定 thread 的只读回合状态；
 - Workbuddy 的只读 `workbuddy.db` 会话状态；
+- 豆包（Doubao）电脑版**当前会话**的工作状态（调试端口优先，窗口控件兜底）；
 - 将统一状态通过设备专属 MQTT 主题发布。
 
 ## 使用
 
-**Windows**：解压 `CodexStatusMonitor-v2.2.0-win64.zip`，进入 `CodexStatusMonitor\`，双击 `CodexStatusMonitor.exe`（无需安装 Python）。
+**Windows**：解压 `CodexStatusMonitor-v2.3.0-win64.zip`，进入 `CodexStatusMonitor\`，双击 `CodexStatusMonitor.exe`（无需安装 Python）。
 
 **macOS**：解压 `CodexStatusMonitor-v2.2.0-macos-<arch>.zip`，把 `CodexStatusMonitor.app` 拖进「应用程序」。首次启动必须**右键 → 打开**（未做 Apple 公证），详见包内 `README-macOS.txt`。
 
 然后：
 
 1. 填写 **Device ID**（唯一必填项）。
-2. 勾选要监听的程序：**Codex Desktop**、**Workbuddy**，可多选。
+2. 勾选要监听的程序：**Codex Desktop**、**Workbuddy**、**豆包（Doubao）**，可多选。
 3. 点击「启动监听」。
 4. 可选：勾选「④ 启动方式」中的**随系统自动启动**，此后开机无需再打开界面。
 
@@ -61,18 +62,42 @@ macOS   : ~/Library/Logs/CodexStatusMonitor/monitor.log
 
 默认主题：`sdgoods/codex/v1/devices/{device_id}/status`。身份不完整或使用 `default`、`REPLACE_ME` 时不会启动发布。
 
+### 豆包（Doubao）通道
+
+豆包电脑版没有公开 API，本地数据库（`%LOCALAPPDATA%\Doubao\User Data\...\*.db`）是**加密的、不是 SQLite**，直读这条路已实测排除。程序改走两条路，按顺序尝试：
+
+| | 做法 | 能力 | 代价 |
+|---|---|---|---|
+| ① 调试端口（优先） | 连 `127.0.0.1:19226` 的 CDP，读聊天页的按钮与页面末尾文字 | 最小化、切后台都能读，最准 | 豆包要以调试参数启动 |
+| ② 窗口控件（兜底） | 用 UI Automation 扫可见窗口的控件树，匹配同样的关键词 | 零配置，什么都不用改 | 豆包窗口必须开着或最小化着，关到托盘就读不到 |
+
+界面里「用调试端口启动豆包」按钮会做三件事：先探端口，已在监听就直接用；豆包正在运行但**没有**调试端口，就提示你先从托盘退出（豆包是单实例，参数注入不进去）；确认没在运行，才以
+`Doubao.exe --remote-debugging-address=127.0.0.1 --remote-debugging-port=19226` 拉起。
+
+判定依据是豆包界面上的措辞，不依赖易变的 CSS 类名：
+
+- 出现「停止生成 / 停止回答 / 正在生成中」→ `WORKING`
+- 出现「深度思考 / 正在搜索 / 正在阅读 / 正在分析」→ `THINKING`
+- 都不出现 → 空闲；从活跃转为空闲时补发一次 `COMPLETED`
+
+只用按钮标签与页面**末尾 600 字**做判定，不扫整段聊天记录 —— 否则历史消息里一句「正在生成中」会让设备永久卡在 WORKING。
+
+豆包只有「当前这一个会话」（界面上看到哪一个就是哪一个），所以没有「跟踪任务数」。会话标题是中文时，`message` 里的任务号用标题的哈希（如 `DB-A1306A2C`），原文保留在 `detail.project_raw` / `detail.task_name_raw`。
+
+排障：`.venv\Scripts\python.exe tools\doubao_probe.py`（加 `--tree` 可 dump 控件树），它会打印进程、窗口、端口、以及「即将发布的状态」。
+
 ## 配置与安全
 
-配置保存位置（schema 版本 2）：
+配置保存位置（schema 版本 3）：
 
 ```
 Windows : <exe 同级>\monitor_config.json
 macOS   : ~/Library/Application Support/CodexStatusMonitor/monitor_config.json
 ```
 
-macOS 下之所以不写在 `.app` 内部：那会破坏代码签名，而且下次替换 app 时配置会跟着丢失。旧版基于 `channels` 的配置会在首次读取时自动迁移为 `watch` 结构，无需手工改写。MQTT 密码只写入本机配置文件，不会出现在状态 payload；生产环境建议使用只允许发布到设备主题的 Broker 账号。
+macOS 下之所以不写在 `.app` 内部：那会破坏代码签名，而且下次替换 app 时配置会跟着丢失。旧版基于 `channels` 的配置会在首次读取时自动迁移为 `watch` 结构，无需手工改写；v2 配置读入后自动补上 `watch.doubao`（默认关闭）。MQTT 密码只写入本机配置文件，不会出现在状态 payload；生产环境建议使用只允许发布到设备主题的 Broker 账号。
 
-状态 payload 的 `message` 为设备友好的 ASCII 单行：`CODEX | project | WORKING` 或 `WORKBUDDY | project | COMPLETED`。原始项目/任务名称保留在 `detail.project_raw` 与 `detail.task_name_raw`。
+状态 payload 的 `message` 为设备友好的 ASCII 单行：`CODEX | project | WORKING`、`WORKBUDDY | project | COMPLETED` 或 `DOUBAO | DB-A1306A2C | THINKING`。原始项目/任务名称保留在 `detail.project_raw` 与 `detail.task_name_raw`。
 
 ## 构建与源码模式（隔离环境）
 
@@ -86,7 +111,7 @@ macOS 下之所以不写在 `.app` 内部：那会破坏代码签名，而且下
 - 需要 Python 3.11+ 且带 tkinter。若系统 `python` 是无 tkinter 的精简版，请确保 `py -3.11` 指向完整 CPython。
 - 配置模板在 PyInstaller 6 的 onedir 布局中会被放进 `_internal`，`build-exe.bat` 构建后额外复制一份到 exe 同级；程序本身也会回退到内置默认配置，模板缺失不会导致启动崩溃。
 - 产物：`build\dist\CodexStatusMonitor\CodexStatusMonitor.exe`；再运行 `python build_release.py` 生成两个包：
-  - `CodexStatusMonitor-v2.2.0-win64.zip` —— **发给 Windows 用户的绿色包**：解压即用，内含 `README.txt`，无需 Python。
+  - `CodexStatusMonitor-v2.3.0-win64.zip` —— **发给 Windows 用户的绿色包**：解压即用，内含 `README.txt`，无需 Python。
   - `codex-status-monitor-release.zip` —— 源码 + 二进制的开发包。
 
 ### macOS 构建
@@ -112,6 +137,8 @@ PyInstaller **不能跨平台编译**：`.app` 只能在 macOS 上生成，Windo
 | `monitor_app.py` | Tk 图形前端（Device ID + 勾选渠道 + 启动方式） |
 | `monitor_engine.py` | 自动滚动窗口监听、状态映射和 MQTT 发布 |
 | `codex_reader.py` | Codex app-server 只读 JSON-RPC 客户端 |
+| `doubao_reader.py` | 豆包状态读取：CDP（自实现最小 WebSocket）+ UI Automation 兜底 |
+| `tools/doubao_probe.py` | 豆包通道排障：进程 / 窗口 / 端口 / 控件树 / 即将发布的状态 |
 | `autostart.py` | 写/删当前用户启动项，并提供 `--minimized` 命令 |
 | `tray_icon.py` | 系统托盘图标（pystray，三色状态 + 右键菜单） |
 | `monitor_config.example.json` | 配置模板（schema v2，`watch` 结构） |

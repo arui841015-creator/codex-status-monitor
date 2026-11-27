@@ -39,6 +39,8 @@ set "PYTHONPATH="
   --hidden-import pystray._win32 ^
   --hidden-import pystray._util.win32 ^
   --hidden-import PIL.ImageDraw ^
+  --hidden-import uiautomation ^
+  --collect-submodules comtypes ^
   --add-data "%~dp0monitor_config.example.json;." ^
   monitor_app.py
 if errorlevel 1 goto build_failed

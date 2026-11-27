@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "identity": {"device_id": ""},
   "mqtt": {
     "host": "117.72.43.16",
@@ -23,6 +23,11 @@
       "max_tasks": 3,
       "interval": 2.0,
       "database": "%USERPROFILE%\\.workbuddy\\workbuddy.db"
+    },
+    "doubao": {
+      "enabled": false,
+      "interval": 2.0,
+      "port": 19226
     }
   }
 }

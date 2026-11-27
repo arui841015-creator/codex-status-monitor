@@ -52,6 +52,8 @@ echo "[4/6] PyInstaller 打包 ..."
   --hidden-import pystray._darwin \
   --collect-submodules pystray \
   --exclude-module pystray._win32 \
+  --exclude-module uiautomation \
+  --exclude-module comtypes \
   --add-data "$ROOT/monitor_config.example.json:." \
   monitor_app.py
 

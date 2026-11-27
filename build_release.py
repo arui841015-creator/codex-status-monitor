@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 OUT_SOURCE = ROOT.parent / "codex-status-monitor-release.zip"
 OUT_USER = ROOT.parent / f"CodexStatusMonitor-v{APP_VERSION}-win64.zip"
 FILES = [
@@ -28,6 +28,9 @@ FILES = [
     "start-monitor.pyw",
     "monitor_engine.py",
     "codex_reader.py",
+    "doubao_reader.py",
+    "tools/doubao_probe.py",
+    "tools/mqtt_watch.py",
     "autostart.py",
     "tray_icon.py",
     "test_monitor_engine.py",
@@ -63,7 +66,7 @@ GUIDE = """Codex Status Monitor v{version}
 1. 解压本压缩包到任意目录（例如 D:\\Tools\\CodexStatusMonitor）。
    注意：请解压后运行，不要在压缩包里直接双击。
 2. 双击 CodexStatusMonitor.exe。
-3. 填写 Device ID，勾选要监听的程序（Codex Desktop / Workbuddy），
+3. 填写 Device ID，勾选要监听的程序（Codex Desktop / Workbuddy / 豆包），
    点「启动监听」。
 4. （可选）勾选「④ 启动方式」里的「随系统自动启动」。
    勾上之后，以后开机不用再打开这个程序：它会自己在后台静默监听，
@@ -75,9 +78,12 @@ Device ID 就是设备的唯一编号（例如 sdg-ecda3b6717f0），
 界面说明
 --------
 - ① 设备身份：填 Device ID，下方会实时显示最终上报主题。
-- ② 勾选渠道：Codex Desktop / Workbuddy 可多选。
+- ② 勾选渠道：Codex Desktop / Workbuddy / 豆包 可多选。
   「跟踪任务数」默认 1，即每个渠道只跟踪最新的那条任务；
   改成 N 则跟踪最新 N 条，出现新任务时自动接管、最旧的自动移出。
+  豆包没有这一项：它只有界面上当前这一个会话。豆包默认不勾选，
+  勾上后只要窗口开着就能读；想让它最小化也能读，就点「用调试端口
+  启动豆包」（需先退出豆包，否则单实例参数注入不进去）。
 - ③ MQTT Broker：已预填默认服务器，需要时才改。
 - ④ 启动方式：勾选「随系统自动启动」，只写入当前用户的启动项
   （HKCU\\...\\Run），不需要管理员权限，也不改系统设置。
