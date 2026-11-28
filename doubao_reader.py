@@ -48,6 +48,13 @@ THINK_WORDS = (
     "正在查找", "正在检索", "搜集资料", "正在浏览",
 )
 BUSY_WORDS = ("正在生成", "生成中", "正在输出", "正在写作")
+# Wording the 工作 (work) mode uses while a task is still running. Its replies
+# carry no stop button and no "生成中" hint, so this is the only literal trace
+# of an active task; the elapsed counter below is the durable one.
+RUNNING_WORDS = ("继续处理任务中", "处理任务中", "正在执行", "任务执行中", "运行中")
+# A finished reply's counter reads "共用时 X 分 Y 秒"; a live one reads
+# "已处理 X 分 Y 秒". Same element, different verb — that verb is the state.
+TIMER_RUNNING_MARK = "已处理"
 # Window/page titles that name the app instead of a conversation.
 APP_TITLES = ("豆包", "doubao", "豆包ai", "豆包 ai")
 # Renderer pages that exist in every client but never hold a conversation:
@@ -71,12 +78,28 @@ PROBE_JS = """
     if (value && value.length < 40) labels.push(value);
     if (labels.length > 300) break;
   }
+  const count = (testid) => document.querySelectorAll(`[data-testid="${testid}"]`).length;
+  // Every reply carries its own elapsed counter; the last one is the live one.
+  const timers = [...document.querySelectorAll('[data-testid="preamble-elapsed-timer"]')]
+    .map((node) => (node.innerText || '').trim().slice(0, 40));
+  const replies = [...document.querySelectorAll('[data-testid="receive_message"]')];
+  // The body tail is useless here: the sidebar sits after the transcript in DOM
+  // order, so "what Doubao just said" has to be read off the last reply itself.
+  const lastReply = replies.length ? (replies[replies.length - 1].innerText || '').slice(-2000) : '';
   return JSON.stringify({
     title: document.title || '',
     href: location.href || '',
     head: body.slice(0, 3000),
     tail: body.slice(-3000),
     labels: labels,
+    // Structural counters. The 工作 (work) composer shows no "generating" text
+    // at all — the stop control is permanently visible and the send button is
+    // permanently hidden — so a live reply has to be spotted by what moves.
+    messages: replies.length,
+    prompts: count('send_message'),
+    timers: timers,
+    lastTimer: timers.length ? timers[timers.length - 1] : '',
+    lastReply: lastReply,
   });
 })()
 """
@@ -90,7 +113,11 @@ def classify_text(text: str) -> str:
     """
     if not text:
         return "idle"
-    if any(word in text for word in STOP_WORDS) or any(word in text for word in BUSY_WORDS):
+    if (
+        any(word in text for word in STOP_WORDS)
+        or any(word in text for word in BUSY_WORDS)
+        or any(word in text for word in RUNNING_WORDS)
+    ):
         return "working"
     if any(word in text for word in THINK_WORDS):
         return "thinking"
@@ -391,13 +418,28 @@ def _probe(target: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
 
 
 def _probe_text(probe: dict[str, Any]) -> str:
+    """The parts of one page that can carry a state word."""
+    last_reply = str(probe.get("lastReply") or "")
+    if not last_reply:
+        # Older builds have no ``receive_message`` hook; fall back to the body.
+        last_reply = str(probe.get("tail") or "")[-600:]
     return "\n".join([
         "\n".join(str(item) for item in (probe.get("labels") or [])),
-        # Only the live tail is scanned, never the whole transcript: a user or
-        # an earlier answer that happens to contain "正在生成" would otherwise
-        # pin the state to WORKING forever.
-        str(probe.get("tail") or "")[-600:],
+        " ".join(str(item) for item in (probe.get("timers") or [])),
+        last_reply,
     ])
+
+
+def classify_probe(probe: dict[str, Any]) -> str:
+    """State of one page, verb-first.
+
+    The newest reply's elapsed counter is the most reliable single bit here: it
+    says "已处理" while the task runs and "共用时" once it is done, and it keeps
+    that verb through the quiet stretches where nothing else on screen moves.
+    """
+    if TIMER_RUNNING_MARK in str(probe.get("lastTimer") or ""):
+        return "working"
+    return classify_text(_probe_text(probe))
 
 
 def cdp_snapshot(port: int) -> dict[str, Any] | None:
@@ -416,6 +458,7 @@ def cdp_snapshot(port: int) -> dict[str, Any] | None:
     session = ""
     href = ""
     errors: list[str] = []
+    fingerprint: dict[str, Any] = {}
     for target in targets:
         try:
             probe = _probe(target)
@@ -424,7 +467,15 @@ def cdp_snapshot(port: int) -> dict[str, Any] | None:
             continue
         if not probe:
             continue
-        candidate = classify_text(_probe_text(probe))
+        if not fingerprint:
+            fingerprint = {
+                "url": str(probe.get("href") or ""),
+                "messages": int(probe.get("messages") or 0),
+                "prompts": int(probe.get("prompts") or 0),
+                "timer": str(probe.get("lastTimer") or ""),
+                "reply": len(str(probe.get("lastReply") or "")),
+            }
+        candidate = classify_probe(probe)
         if candidate == "working":
             state = "working"
         elif candidate == "thinking" and state == "idle":
@@ -445,7 +496,33 @@ def cdp_snapshot(port: int) -> dict[str, Any] | None:
         "title": final_title,
         "session": session or session_key(href, final_title),
         "url": href,
+        "_fingerprint": fingerprint,
     }
+
+
+def _advanced(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    """True when the conversation holds more than it did on the last poll.
+
+    This is the only signal the 工作 composer offers: no label changes, no
+    spinner that survives a frame, just a transcript that keeps growing and an
+    elapsed-time counter that keeps ticking. Counters are compared per page so
+    switching conversations cannot masquerade as progress.
+    """
+    if not previous or not current:
+        return False
+    if current.get("url") != previous.get("url"):
+        return False
+    if int(current.get("prompts") or 0) > int(previous.get("prompts") or 0):
+        return True
+    if int(current.get("messages") or 0) > int(previous.get("messages") or 0):
+        return True
+    # A reply that is being written is longer than it was a poll ago. Only
+    # growth counts: collapsing a step list or switching away shrinks it, and
+    # that is not progress.
+    if int(current.get("reply") or 0) > int(previous.get("reply") or 0):
+        return True
+    timer = str(current.get("timer") or "")
+    return bool(timer) and timer != str(previous.get("timer") or "")
 
 
 # --------------------------------------------------------------------------
@@ -834,11 +911,17 @@ def launch_debug(
 class DoubaoReader:
     """Best available read-only view of what Doubao is doing right now."""
 
+    # A reply keeps the state alive between two visible changes: steps arrive in
+    # bursts, and a poll landing in the gap must not report "idle" mid-task.
+    GRACE_SECONDS = 10.0
+
     def __init__(self, port: int = DEFAULT_CDP_PORT, logger: logging.Logger | None = None) -> None:
         self.port = int(port or DEFAULT_CDP_PORT)
         self.log = logger or logging.getLogger("codex-status-monitor")
         self.last_source = ""
         self.last_error = ""
+        self._fingerprint: dict[str, Any] = {}
+        self._last_growth = 0.0
 
     def snapshot(self) -> dict[str, Any] | None:
         """Current state, or None when Doubao cannot be read at all."""
@@ -851,6 +934,7 @@ class DoubaoReader:
         if cdp:
             self.last_source = "cdp"
             self.last_error = ""
+            self._apply_progress(cdp)
             return cdp
         try:
             window = uia_snapshot()
@@ -861,7 +945,34 @@ class DoubaoReader:
             self.last_source = "uia"
             self.last_error = ""
             return window
-        if not errors:
-            errors.append("没有可见的豆包窗口")
-        self.last_error = "；".join(errors)
+        self.last_error = self._diagnose(errors)
         return None
+
+    def _apply_progress(self, snap: dict[str, Any]) -> None:
+        """Promote ``idle`` to ``working`` while the transcript keeps growing."""
+        fingerprint = snap.pop("_fingerprint", {}) or {}
+        if not fingerprint:
+            return
+        same_page = fingerprint.get("url") == (self._fingerprint or {}).get("url")
+        grew = same_page and _advanced(self._fingerprint, fingerprint)
+        self._fingerprint = fingerprint
+        if not same_page:
+            self._last_growth = 0.0
+            return
+        if grew:
+            self._last_growth = time.time()
+        if snap.get("state") == "idle" and self._last_growth:
+            if time.time() - self._last_growth <= self.GRACE_SECONDS:
+                snap["state"] = "working"
+                snap["progress"] = True
+
+    def _diagnose(self, errors: list[str]) -> str:
+        """"Closed" and "running without the port" need different answers."""
+        if not doubao_pids():
+            return "豆包没有在运行"
+        if not port_open(self.port):
+            return (
+                f"豆包在运行，但没开调试端口 {self.port}："
+                "点「用调试端口启动豆包」会重启它并开好端口（后台也能读）"
+            )
+        return "；".join(errors[:2]) or "豆包页面暂时读不到"

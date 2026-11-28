@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.3.3"
 OUT_SOURCE = ROOT.parent / "codex-status-monitor-release.zip"
 OUT_USER = ROOT.parent / f"CodexStatusMonitor-v{APP_VERSION}-win64.zip"
 FILES = [

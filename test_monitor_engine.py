@@ -25,9 +25,11 @@ from monitor_engine import (
 )
 from doubao_reader import (
     WebSocketError,
+    _advanced,
     _exe_from,
     cdp_targets,
     chat_targets,
+    classify_probe,
     classify_text,
     conversation_title,
     debug_port_ready,
@@ -279,6 +281,38 @@ class MonitorEngineTests(unittest.TestCase):
         self.assertEqual(snap["state"], "working")
         self.assertEqual(snap["title"], "季度报告整理")
         self.assertEqual(snap["source"], "cdp")
+
+    def test_doubao_work_mode_reads_its_elapsed_counter(self) -> None:
+        """The 工作 UI has no stop button; the counter's verb carries the state.
+
+        Captured from the real client: a running reply shows
+        "已处理 2 分 22 秒" and flips to "共用时 3 分 2 秒" the moment it ends.
+        """
+        running = {"title": "豆包工作精灵 - 豆包", "lastTimer": "已处理 2 分 22 秒",
+                   "timers": ["共用时 2 分 14 秒", "已处理 2 分 22 秒"],
+                   "lastReply": "已处理 2 分 22 秒\n继续处理任务中", "labels": []}
+        finished = {"title": "豆包工作精灵 - 豆包", "lastTimer": "共用时 3 分 2 秒",
+                    "timers": ["共用时 3 分 28 秒", "共用时 3 分 2 秒"],
+                    "lastReply": "共用时 3 分 2 秒\n已改成自动弹出", "labels": []}
+        self.assertEqual(classify_probe(running), "working")
+        self.assertEqual(classify_probe(finished), "idle")
+        # An older finished reply must not keep the state pinned: only the
+        # newest counter is consulted.
+        stale = dict(finished, timers=["已处理 9 分 9 秒", "共用时 3 分 2 秒"])
+        self.assertEqual(classify_probe(stale), "idle")
+
+    def test_doubao_progress_counts_as_working(self) -> None:
+        base = {"url": "chrome://doubao-chat/chat/1", "messages": 2, "prompts": 1,
+                "timer": "已处理 1 分", "reply": 100}
+        self.assertTrue(_advanced(base, dict(base, reply=180)))
+        self.assertTrue(_advanced(base, dict(base, timer="已处理 1 分 5 秒")))
+        self.assertTrue(_advanced(base, dict(base, messages=3)))
+        self.assertFalse(_advanced(base, dict(base)))
+        # A collapse shrinks the reply; that is not progress.
+        self.assertFalse(_advanced(base, dict(base, reply=40)))
+        # Another conversation is never growth.
+        self.assertFalse(_advanced(base, dict(base, url="chrome://doubao-chat/chat/2", reply=999)))
+        self.assertFalse(_advanced(None, base))
 
     def test_doubao_config_is_off_by_default(self) -> None:
         config = normalize_config({"version": 2, "identity": {"device_id": "sdg-abc-01"}})

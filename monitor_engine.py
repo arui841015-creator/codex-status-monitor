@@ -54,7 +54,7 @@ STATUS_LABELS = {
 FINAL_STATES = {"worked", "failed", "canceled"}
 ACTIVE_STATES = {"thinking", "working", "responding", "waiting"}
 # Human wording for the log line that confirms the Doubao channel is readable.
-DOUBAO_STATE_LABELS = {"idle": "空闲", "thinking": "思考中", "working": "生成中"}
+DOUBAO_STATE_LABELS = {"idle": "空闲", "thinking": "思考中", "working": "执行中"}
 WORKBUDDY_STATUS = {
     "pending": "thinking", "queued": "thinking", "created": "thinking",
     "running": "working", "working": "working", "processing": "working",
@@ -798,11 +798,10 @@ class MonitorManager:
                     self._emit_log(f"豆包已在跟踪（{source}）")
             if snap is None and not warned:
                 warned = True
-                reason = reader.last_error or "既没有调试端口，也没有打开的豆包窗口"
-                self._emit_log(
-                    f"豆包暂不可读：{reason}。"
-                    f"要么让豆包窗口保持打开，要么点「用调试端口启动豆包」以调试模式重启它"
-                )
+                # The reader already explains which of the three cases it hit
+                # (not running / running without the port / page unreadable);
+                # appending generic advice on top of it only muddles that.
+                self._emit_log(f"豆包暂不可读：{reader.last_error or '未知原因'}")
             elif snap is not None:
                 warned = False
             self._stop.wait(delay)

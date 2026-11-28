@@ -312,9 +312,9 @@ class MonitorApp(tk.Tk):
         self.doubao_state_label.grid(row=8, column=4, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(
             channels,
-            text="豆包状态有两种读法：① 用左侧按钮把豆包以调试端口启动（最小化、切到后台都能读，最准）；"
-                 "② 什么都不做，只要豆包窗口开着也能读。窗口关到托盘又没有调试端口时读不到，此时不会误报。"
-                 "可执行文件留空即自动查找（含非系统盘安装）。",
+            text="豆包状态怎么读：① 用左侧按钮把豆包以调试端口启动——最小化、切到后台都能读，推荐；"
+                 "② 不切换调试端口时，只有豆包窗口开着（没缩到托盘）才可能靠窗口读取。"
+                 "豆包关闭时会显示「豆包未运行」，这是正常状态。可执行文件留空即自动查找（含非系统盘安装）。",
             foreground="#666", wraplength=720, justify="left",
         ).grid(row=9, column=0, columnspan=6, sticky="w", pady=(6, 0))
 
@@ -691,7 +691,7 @@ class MonitorApp(tk.Tk):
             return
         if status.get("ok"):
             source = "调试端口" if status.get("source") == "cdp" else "窗口读取"
-            state = {"idle": "空闲", "thinking": "思考中", "working": "生成中"}.get(status.get("state"), status.get("state"))
+            state = {"idle": "空闲", "thinking": "思考中", "working": "执行中"}.get(status.get("state"), status.get("state"))
             title = status.get("title") or ""
             text = f"● 已读到（{source}）· {state}"
             if title and title not in ("豆包", "Doubao"):
@@ -700,8 +700,13 @@ class MonitorApp(tk.Tk):
             self.doubao_state_label.configure(foreground="#0a6" if state != "空闲" else "#4a8")
         else:
             reason = str(status.get("error") or "读不到豆包")
-            self.vars["db_state"].set(f"● 读不到：{reason[:40]}")
-            self.doubao_state_label.configure(foreground="#a33")
+            if "没有在运行" in reason:
+                # Closing Doubao is a normal thing to do, not a fault.
+                self.vars["db_state"].set("● 豆包未运行")
+                self.doubao_state_label.configure(foreground="#888")
+            else:
+                self.vars["db_state"].set(f"● 读不到：{reason[:44]}")
+                self.doubao_state_label.configure(foreground="#a33")
 
     def _observation(self, item: dict[str, Any]) -> None:
         target = self.incoming_output if item.get("direction") == "incoming" else self.outgoing_output
